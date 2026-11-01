@@ -41,6 +41,9 @@ class Diag extends EventEmitter {
         this.signals = signals; this.log = log;
         this.p = null; this.available = false; this.error = null;
         this.quiet = false;           // true: don't log every request (apps that poll)
+        this.busyMs = 1000;           // pause before a retry when the transport is busy (x 1, 2, 3, 4)
+        this.busyLog = true;          // log each busy verdict (false: only count them in .busy)
+        this.busy = 0;
     }
 
     async init() {
@@ -69,14 +72,14 @@ class Diag extends EventEmitter {
      * Send one request; resolves with the transport's verdict ('NO_ERROR', 'REQUEST_PENDING', ...).
      * The transport turns requests away while it is still busy with an earlier one (e.g. a second
      * functional request a few seconds after the first: APP_REQUEST_TEMPORARILY_NOT_ACCEPTED), so
-     * such a verdict is retried a few times with a growing pause (1, 2, 3, 4 s).
+     * such a verdict is retried a few times with a growing pause (busyMs x 1, 2, 3, 4: 1, 2, 3, 4 s).
      */
     async send(target, sid, data, opts) {
         if (!this.p) throw new Error(this.error || 'no diagnostic link');
         const d = data || [];
         const maxRetries = opts && opts.maxRetries != null ? opts.maxRetries : 4;
         const callTimeoutMs = opts && opts.callTimeoutMs || 8000;
-        const retryBaseMs = opts && opts.retryBaseMs || 1000;
+        const retryBaseMs = opts && opts.retryBaseMs || this.busyMs;
         if (!this.quiet) this.log.info('UDS -> ' + hex(target) + ': ' + hex(sid) + ' ' + d.map((x) => hex(x)).join(' '));
         for (let attempt = 0; ; attempt++) {
             const r = await this.signals.call(this.p, 'sendTasuRequest', {
@@ -86,7 +89,8 @@ class Diag extends EventEmitter {
             const v = r && typeof r === 'object' ? (r.TasuErrorEnum || Object.keys(r).map((k) => r[k]).find((x) => typeof x === 'string')) : r;
             const verdict = v === undefined ? 'NO_ERROR' : String(v);
             if (!/TEMPORARILY_NOT_ACCEPTED|BUSY/i.test(verdict) || attempt >= maxRetries) return verdict;
-            this.log.info('transport busy (' + verdict + '), retrying');
+            this.busy++;
+            if (this.busyLog) this.log.info('transport busy (' + verdict + '), retrying');
             await new Promise((res) => setTimeout(res, retryBaseMs * (attempt + 1)));
         }
     }
