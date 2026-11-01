@@ -40,20 +40,6 @@
         "checkAfterSeconds": 120,
         "healthySeconds": 60
       }
-    },
-    { "id": "cluster-render", "path": "waze/cluster-render", "mguHmi": ["ID7"] },
-    { "id": "waze-on-cluster", "path": "waze/waze-on-cluster", "mguHmi": ["ID7"] }
-  ],
-  "components": [
-    {
-      "id": "robertn_waze_cluster",
-      "kind": "app",
-      "path": "waze/robertn_waze_cluster",
-      "title": "Waze on cluster",
-      "description": "The CarPlay map (Waze, Apple Maps or Google Maps) on the instrument cluster, by Robert Nisipeanu. Set the cluster's Central display area to Map view: the Waze map replaces the stock map while CarPlay streams it. Installs the Waze tool and the cluster renderer with it.",
-      "requires": { "waze-on-cluster": "0.7.3" },
-      "uninstallable": true,
-      "mguHmi": ["ID7"]
     }
   ]
 }
