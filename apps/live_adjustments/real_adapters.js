@@ -81,6 +81,7 @@ const Mg1ElAgk = {
         this._guard();
         await this.prepare(link);
         const r = await link.sendToDme(req.sid, req.data);
+        // ok only on 6F 60FD: sendToDme takes no other reply as this one's (replyTo)
         return { accepted: !!r.ok, confirmed: 'UNKNOWN', detail: r.ok ? 'DME accepted' : (r.reason || 'rejected') };
     },
     async open(link) { return this._send(this.OPEN_REQUEST, link); },

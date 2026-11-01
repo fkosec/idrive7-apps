@@ -19,7 +19,7 @@ const mgu = require('./kit/mgu');
 const G = require('./kit/gauges');
 const { Canvas } = require('./kit/canvas');
 const UI = require('./ui');
-const { Controller } = require('./controller');
+const { Controller, REFRESH_KEYS } = require('./controller');
 const { TuneControl } = require('./tune');
 const { XDriveControl } = require('./xdrive');
 const Car = require('./kit/car');
@@ -103,8 +103,11 @@ mgu.run({
         ui.onClick('BTN_OEM', acts.oem);
         ui.onClick('BTN_PAGE', () => { const l = pages(); page = l[(l.indexOf(page) + 1) % l.length]; return render(); });
         ctx.onTab((i) => { const l = pages(); if (l[i]) page = l[i]; return render(); });
-        // the tune is looked at again only when it changes (a theme change sends nothing)
-        settings.onChange((key) => controller.refresh().then(() => key === 'tuner' && tune.refresh())
+        // the DME is looked at again when the flap's or the tune's setting changes, or (armed) while none was found
+        // yet: it may have been asleep at start-up. A theme change with the DME found sends nothing.
+        const lost = () => controller.armedSetting && !(controller.ident && controller.ident.present);
+        settings.onChange((key) => Promise.resolve((REFRESH_KEYS.indexOf(key) >= 0 || lost()) && controller.refresh())
+            .then(() => key === 'tuner' && tune.refresh())
             .then(() => key === 'xdrive' && xdrive.refresh())
             .then(repaint).catch((e) => log.error('settings', e)));
 
