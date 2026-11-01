@@ -1,4 +1,4 @@
-**English** | [中文 (Chinese translation)](README.zh-CN.md)
+**English** | [中文 (Chinese translation)](README.zh-CN.md) | [Русский (Russian translation)](README.ru.md)
 
 <h1 align="center">MGU Custom Apps</h1>
 
@@ -295,19 +295,32 @@ too; the tool lists anything missing.
 ### 3.2 Build
 
 ```sh
-python3 kit/tools/build.py            # all apps -> dist/<id>@<ver>.mgu
-python3 kit/tools/build.py redline    # just one
-python3 kit/tools/build.py --language zh-CN   # Simplified Chinese -> dist/<id>@<ver>-zh.cn.2.mgu
-node kit/tools/preview.js dist/redline preview wait=10   # render it on the PC -> preview/*.png
+python3 kit/tools/build.py            # all apps, English -> dist/<id>@<ver>.mgu
+python3 kit/tools/build.py redline    # just one app, English
+python3 kit/tools/build.py --language ru       # Russian -> dist/<id>@<ver>-ru.<revision>.mgu
+python3 kit/tools/build.py --language zh-CN    # Simplified Chinese -> dist/<id>@<ver>-zh.cn.2.mgu
+node kit/tools/preview.js dist/redline preview wait=10   # English PC preview -> preview/*.png
 ```
 
 (On Windows type `python` instead of `python3`.)
 
-English is the default. **Chinese:** `--language zh-CN` builds every app in Simplified Chinese
-(the language is fixed at build time; the car's language setting doesn't change it). Installing
-the other language's package swaps it like an update. Chinese translation by 小白151
+English is the default and the only UI language in a default package. Every package is fixed-language:
+there is no **Settings → Language** setting or runtime switch, and `--languages` multilanguage
+subsets are not supported. Use `--language ru` with `build.py` or `make_kit.py` for a Russian build;
+its version has a language suffix (`dist/<id>@<ver>-ru.<revision>.mgu`). `--language zh-CN` keeps the
+existing fixed Chinese build behavior. Installing another language's package swaps it like an update.
+
+Every package contains all **33 HMI locale tables**, with all 256 `SID_CN_DYNAMIC` slots populated
+in every table. Existing Chinese resources and credit behavior stay unchanged; the small Cyrillic
+atlas is added only with `ru`. Russian translates every app's UI and the available
+complete Fault Scanner descriptions; uncatalogued diagnostic prose remains English. The Chinese
+database translation is included with `zh-CN`. `kit/tools/import_diagnostic_ru.py` imports a fuller
+Russian catalog from your own EN/RU `DiagDocDb` databases without changing the bundled English
+`dtc_db.pack`.
+
+Chinese translation by 小白151
 ([JackieZ123430](https://github.com/JackieZ123430), [idrive7-apps-cn](https://github.com/JackieZ123430/idrive7-apps-cn));
-Chinese guide: [README.zh-CN.md](README.zh-CN.md).
+guides: [中文](README.zh-CN.md), [Русский](README.ru.md).
 
 The `.mgu` files contain BMW's SDK, so keep them for your own car and don't publish them.
 
@@ -317,14 +330,15 @@ Car parked, ignition on, ideally with a battery charger connected. First pack th
 apps, the installer and the GPU renderer) into `dist/mgu-custom-apps.tar.gz`:
 
 ```sh
-deploy/make-car-kit.sh                 # macOS / Linux / WSL
+deploy/make-car-kit.sh                 # macOS / Linux / WSL: all apps, English
 deploy\make-car-kit.cmd                # Windows (cmd or PowerShell)
-python3 kit/tools/make_kit.py redline  # any OS; just some apps
-python3 kit/tools/make_kit.py --language zh-CN   # Chinese kit -> dist/mgu-custom-apps-zh-CN(.tar.gz)
+python3 kit/tools/make_kit.py redline  # any OS; just some apps, English
+python3 kit/tools/make_kit.py --language ru       # Russian kit -> dist/mgu-custom-apps-ru(.tar.gz)
+python3 kit/tools/make_kit.py --language zh-CN    # Chinese kit -> dist/mgu-custom-apps-zh-CN(.tar.gz)
 ```
 
-(For the Chinese kit, give `push-to-car.sh` `KIT=dist/mgu-custom-apps-zh-CN` and `push-to-car.ps1`
-`-Kit dist\mgu-custom-apps-zh-CN.tar.gz`.)
+(For a kit with a filename suffix, give `push-to-car.sh` the matching `KIT=dist/<kit-folder>` and
+`push-to-car.ps1` `-Kit dist\<kit-file>.tar.gz`.)
 
 Then push it over SSH. macOS / Linux / WSL:
 
@@ -658,7 +672,9 @@ the old copy. The unit runs stock and the custom apps are simply hidden. Run
 
 An app is two files in `apps/<id>/`: `app.json` (what it is) and `main.js` (what it does).
 `build.py` generates the BMW package around them: RHMI layout, entry point, icon, text bundles for
-all 33 HMI languages, manifest, permissions and runner.
+one fixed UI language and all 33 HMI locale tables, manifest, permissions and runner. Add a catalog as
+`kit/runtime/locales/<tag>.json` (an editable `<tag>.tsv` can be synced with
+`python3 kit/tools/sync_locales.py`); fixed-language builds then select it through `--language <tag>`.
 
 ### 6.1 `app.json`
 
@@ -767,6 +783,8 @@ bar otherwise), `header`, `menuBar` (`slim` / `standard`). Dials, bars
 and the g-meter glide to new values on their own; `G.smooth(key, value)` does the same for your
 own drawings. Fonts: `label`, `bold`, `num`, `light`, `gear`. Large sizes contain digits and a
 few letters only; re-bake with `kit/tools/bake_fonts.py` (Ubuntu font family) if you need more.
+`bake_cjk.py` regenerates the Chinese atlas and `bake_cyrillic.py` the Russian one (both need
+Pillow); the committed atlases are sufficient for normal builds.
 
 **`Car`** (`kit/runtime/car.js`): groups `rpm`, `speed`, `temps`, `accel`, `gear`, `torque`.
 `car.data()` returns `{ rpm, speed, gLong, gLat, coolant, oil, gear, torque, demo }` in real
@@ -926,7 +944,7 @@ kit/runtime/          app runtime: mgu.js (platform glue), record.js + display.j
                       (GPU path), canvas.js (software path), gauges.js, themes.js,
                       car.js (signals + demo), sim.js (demo drive), signals.js (SOME/IP),
                       diag.js (UDS over TASU), readonly-diag.js (the same, reading only),
-                      sgbd.js (replies -> values with an SGBD catalog), ecus.js, fonts/
+                      sgbd.js (replies -> values with an SGBD catalog), ecus.js, fonts/, locales/ (editable TSV + runtime JSON)
 kit/renderd/          mgu-renderd: the GPU renderer service (mgu-render: C, GLES2, Wayland/ivi),
                       GPL-3.0-or-later; prebuilt/ = the ready binary + the source fingerprint it
                       was built from; inputgate/ = the controller gate

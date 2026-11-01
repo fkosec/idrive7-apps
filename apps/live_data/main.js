@@ -63,6 +63,7 @@ const TRIPS = require('./trips');
 const DEMO = require('./demo');
 const PICK = require('./picker');
 const PAGES = require('./pages');
+const { t: translate, plural } = require('./kit/i18n');
 const Sim = require('./kit/sim');
 
 const W = 1600, H = 520, COLS = 5, CARDS = 30, ROWS = PAGES.ROWS, ROW_H = PAGES.ROW_H;
@@ -579,11 +580,11 @@ mgu.run({
             const sigItem = (it) => ({ key: 'sig:' + it.id, fav: { sig: it.id, name: it.name }, name: it.name, text: () => sigText(it) });
             SIG.GROUPS.forEach((g) => {
                 const list = g.items.filter(sigListed).map(sigItem);
-                if (list.length) out.push({ name: g.items.every((it) => it.tc) ? g.group : 'Car signals: ' + g.group, items: list });
+                if (list.length) out.push({ name: g.items.every((it) => it.tc) ? g.group : translate('Car signals') + ': ' + translate(g.group), items: list });
             });
             const u = engineUnit();
             (usefulOf(u) || []).forEach((g) => out.push({
-                name: 'Engine unit: ' + g.group,
+                name: translate('Engine unit') + ': ' + translate(g.group),
                 items: g.items.map((ur) => ({
                     key: u.addr + ':useful:' + ur.item.name, name: ur.item.name, text: () => usefulValue(u, ur),
                     fav: { addr: u.addr, sgbd: u.sgbd, useful: ur.item.name, c: ur.item.c || ur.item.minus, minus: !!ur.item.minus, u: ur.item.u, name: ur.item.name },
@@ -679,7 +680,7 @@ mgu.run({
             cursor = i;
             const cur = sc.slots[i] || null;
             openSheet(picker = PICK.valueSheet({
-                title: 'Gauge ' + (i + 1) + ' (' + (SCR.KINDS[SCR.layout(sc.layout).slots[i]] || 'gauge') + ')',
+                title: translate('Gauge') + ' ' + (i + 1) + ' (' + translate(SCR.KINDS[SCR.layout(sc.layout).slots[i]] || 'gauge') + ')',
                 groups: pickGroups, current: cur ? cur.k : null,
                 choose: (c) => setSlot(sc, i, c),
                 layouts: SCR.LAYOUTS, layout: sc.layout, setLayout: (id) => setLayout(sc, id),
@@ -987,7 +988,7 @@ mgu.run({
                 demoUnits = demo;
                 units.forEach((u) => { u.silent = false; log.info('unit ' + hex(u.addr) + ': SGBD index ' + (u.index || 'none') + ' -> ' + (u.variant || 'unknown type') + (u.sgbd ? ', catalog ' + u.sgbd + (u.closest ? ' (closest)' : '') + (catalog(u.sgbd).builtin ? ' (built in)' : '') : '')); });
                 try { fs.writeFileSync(UNITS_FILE, JSON.stringify({ at: Date.now(), demo, units: units.map((u) => ({ addr: u.addr, index: u.index, variant: u.variant })) })); } catch (e) { log.warn('save units: ' + e); }
-                msg = units.length ? units.length + ' control units answered' : 'No control unit answered - ignition on?';
+                msg = units.length ? units.length + ' ' + plural(units.length, 'control units answered', 'control units answered') : 'No control unit answered - ignition on?';
                 phase = 'done';
             } catch (e) {
                 log.warn('scan units: ' + e);
@@ -1097,7 +1098,7 @@ mgu.run({
             const p = G.panel(cv, t, 24, 52, 1552, 460, 'Control units');
             let bx = 42 + cv.textWidth('Control units', 26, { font: 'bold' }) + 28;
             bx += G.button(cv, t, bx, 62, 0, 38, busy ? 'Scanning...' : 'Scan units', scanUnits, { key: 'scan', busy, primary: !units.length }) + 12;
-            const note = browseNote('knob: choose  ·  press: open') || msg || (units.length ? units.length + ' answered' : '');
+            const note = browseNote('knob: choose  ·  press: open') || msg || (units.length ? units.length + ' ' + plural(units.length, 'answered', 'answered') : '');
             if (busy) {
                 const w = 300, x = 1552 - w, f = (Date.now() / 1200) % 1;
                 cv.roundRect(x, 71, w, 8, 4, t.track);
@@ -1134,7 +1135,7 @@ mgu.run({
             let note = u.msg, progress = null;
             if (sweep && sweep.u === u) { progress = sweep.i / sweep.rows.length; note = 'Reading ' + sweep.i + ' / ' + sweep.rows.length; } else if (!note) {
                 const ok = all.filter((r) => state(u.res[r.key]) === 'ok').length;
-                note = (scrolls ? '' : (pg.p * ROWS + 1) + '-' + Math.min(all.length, pg.p * ROWS + ROWS) + ' of ' + all.length + '  ·  ') + ok + ' of ' + all.length + ' read';
+                note = (scrolls ? '' : (pg.p * ROWS + 1) + '-' + Math.min(all.length, pg.p * ROWS + ROWS) + ' ' + translate('of') + ' ' + all.length + '  ·  ') + ok + ' ' + translate('of') + ' ' + all.length + ' ' + translate('read');
                 if (details() && c) note += '  ·  catalog ' + c.sgbd + (c.builtin ? ' (built in)' : '') + (u.closest ? ', the closest' : '');
                 if (u.silent) note += '  ·  not answering';
             }
@@ -1157,7 +1158,7 @@ mgu.run({
             const items = all.filter((r) => !r.header);
             const ok = items.filter((r) => (r.useful ? usefulRows(u, r.useful).every((x) => state(u.res[x.key]) === 'ok') : state(u.res[r.key]) === 'ok')).length;
             const note = browseNote('knob: scroll  ·  push up / down: page') || (u.silent ? 'The engine unit isn\'t answering (ignition on?)'
-                : (scrolls || items.length <= ROWS ? '' : 'page ' + (pg.p + 1) + ' of ' + pg.n + '  ·  ') + ok + ' of ' + items.length + ' values read');
+                : (scrolls || items.length <= ROWS ? '' : translate('page') + ' ' + (pg.p + 1) + ' ' + translate('of') + ' ' + pg.n + '  ·  ') + ok + ' ' + translate('of') + ' ' + items.length + ' ' + translate('values read'));
             gliding = PAGES.listPanel(cv, t, G, fit, {
                 title: 'Engine', note, noteColor: u.silent ? t.warn : null, details: details(),
                 rows: rows.map((row) => {
@@ -1175,7 +1176,7 @@ mgu.run({
             const all = sigView(), items = all.filter((r) => r.sig), rows = listRows(pg);
             const n = items.filter((r) => { const v = sigValue(r.sig); return v && !v.bad; }).length;
             const note = browseNote('knob: scroll  ·  push up / down: page') || (!sigSubs && !sigDemo() ? 'connecting...'
-                : (scrolls ? '' : 'page ' + (pg.p + 1) + ' of ' + pg.n + '  ·  ') + n + ' of ' + items.length + ' with a value');
+                : (scrolls ? '' : translate('page') + ' ' + (pg.p + 1) + ' ' + translate('of') + ' ' + pg.n + '  ·  ') + n + ' ' + translate('of') + ' ' + items.length + ' ' + translate('with a value'));
             gliding = PAGES.listPanel(cv, t, G, fit, {
                 title: 'Car signals', note, details: details(),
                 rows: rows.map((row) => {

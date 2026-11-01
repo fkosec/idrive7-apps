@@ -13,6 +13,8 @@ on:
       - 'kit/tools/build.py'
       - 'kit/tools/pack_data.py'
       - 'kit/tools/localize.py'
+      - 'kit/tools/import_diagnostic_ru.py'
+      - 'kit/tools/build_diagnostic_ru.py'
       - '.github/workflows/app-tests.yml'
   push:
     paths:
@@ -23,6 +25,8 @@ on:
       - 'kit/tools/build.py'
       - 'kit/tools/pack_data.py'
       - 'kit/tools/localize.py'
+      - 'kit/tools/import_diagnostic_ru.py'
+      - 'kit/tools/build_diagnostic_ru.py'
       - '.github/workflows/app-tests.yml'
 
 permissions:
@@ -47,3 +51,4 @@ jobs:
       - run: node kit/tools/test_gforce.js
       - run: node kit/tools/test_zh.js
       - run: cd kit/tools && python3 test_zh.py
+      - run: python3 kit/tools/test_import_diagnostic_ru.py
