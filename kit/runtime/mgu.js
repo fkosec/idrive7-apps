@@ -91,9 +91,13 @@ class Settings {
         try { Object.assign(this.values, JSON.parse(fs.readFileSync(this.file, 'utf8'))); } catch (e) {}
         // one-time move of saved settings to the new default theme (M Tricolour); later choices are kept
         const th = this.item('theme');
-        if (th && fs.existsSync(this.file) && this.values._themeV !== 2) {
-            this.values.theme = th.default; this.values._themeV = 2;
-            try { fs.writeFileSync(this.file, JSON.stringify(this.values, null, 1)); } catch (e) { /* read-only */ }
+        if (th && this.values._themeV !== 2) {
+            const saved = fs.existsSync(this.file);
+            this.values._themeV = 2;            // (a fresh install has the default: the mark is saved with its first setting)
+            if (saved) {
+                this.values.theme = th.default;
+                try { fs.writeFileSync(this.file, JSON.stringify(this.values, null, 1)); } catch (e) { /* read-only */ }
+            }
         }
         // a setting with "reset": n in app.json goes back to its default once when n changes
         // (a new default reaches cars that saved the old one); later choices are kept
