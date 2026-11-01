@@ -15,7 +15,7 @@ async function main(){
  assert.strictEqual(t('Settings'),chinese?'设置':'Settings');
  assert.strictEqual(t('rpm'),'rpm');assert.strictEqual(t('config.battery'),'config.battery');
  assert.strictEqual(require(path.join(kit,'i18n')).setLanguage,undefined,'no runtime language switching');
- const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'mgu-language-'));
+ const tmp=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'mgu-language-')));
  try{
   fs.copyFileSync(path.join(kit,'i18n.js'),path.join(tmp,'i18n.js'));
   for(const language of ['en','zh-CN','de-test']){
