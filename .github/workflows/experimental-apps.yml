@@ -10,6 +10,7 @@ on:
       - 'kit/tools/test_zf8hp.js'
       - 'kit/tools/test_live_adjustments.js'
       - 'kit/tools/test_diag_options.js'
+      - 'kit/tools/test_diag_replies.js'
       - '.github/workflows/experimental-apps.yml'
   push:
     paths:
@@ -20,6 +21,7 @@ on:
       - 'kit/tools/test_zf8hp.js'
       - 'kit/tools/test_live_adjustments.js'
       - 'kit/tools/test_diag_options.js'
+      - 'kit/tools/test_diag_replies.js'
       - '.github/workflows/experimental-apps.yml'
 
 permissions:
@@ -37,3 +39,4 @@ jobs:
       - run: node kit/tools/test_zf8hp.js
       - run: node kit/tools/test_live_adjustments.js
       - run: node kit/tools/test_diag_options.js
+      - run: node kit/tools/test_diag_replies.js
