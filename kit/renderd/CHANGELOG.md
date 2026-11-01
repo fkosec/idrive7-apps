@@ -1,5 +1,24 @@
 # mgu-render changelog
 
+## idrive7-apps mgu-renderd 2.1.8
+
+upstream idrive7-apps 2.1.7, on this fork's 2.1.7:
+
+- An app that sends faster than the renderer reads no longer grows its input buffer without limit: the renderer
+  handles the whole messages after each read, holds at most one message being received (24 MiB and 128 KiB more)
+  and reads about that much an app per wakeup, so one busy app does not hold up the others. A failed allocation
+  closes that app's connection instead of crashing the renderer.
+- Ramps: a ramp's row is freed with the app's resources (a new size or a disconnect). Before, rows were handed out
+  in a ring of 256 shared by all apps, so after enough ramps one app's ramp took the row of another app's and
+  drew in its colours. A ramp past the limits (64 an app, 256 rows for all apps) now gets an ERROR and is logged;
+  a new row with no colours is cleared, not left with the last owner's.
+- Foreground gate: a failed pipe or fork closes the pipes it opened, and a failed fork no longer leaves pid -1, which
+  stopping the gate would have signalled (every process).
+- js/mgu_render_client.js: a scale-only PLACE keeps the pictures, atlases and ramps, as the renderer does (they were
+  uploaded again, and past 64 pictures refused); after a reconnect a message cut off with the old connection no
+  longer blocks the new one's messages.
+- Tests: test_gate, test_client_read, test_ramp, test_client_place and test_client_reconnect in `make test`.
+
 ## idrive7-apps mgu-renderd 2.1.7
 
 - Apps fit the screen the HMI is shown on. The renderer finds the HMI's own surface (by its process, `hmi_process`)

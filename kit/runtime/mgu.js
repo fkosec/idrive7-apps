@@ -57,6 +57,16 @@ function fileLog(level, msg) {
         return original.apply(sdkLog, args);
     };
 });
+// ...and the SDK's info lines that say why it did not create the app's screens (a CONFIG_STATE start, a
+// resource error, or a newer SDK's "conditionalLoading rhmiLoadingEnabled skipping loading": issue #39)
+{
+    const original = sdkLog.info;
+    sdkLog.info = (...args) => {
+        const message = args.map((x) => x && x.stack || String(x)).join(' ');
+        if (/conditionalLoading|_createRhmiApplication/.test(message) && message.indexOf(SPEC.id + ': ') !== 0) fileLog('SDK_INFO', message);
+        return original.apply(sdkLog, args);
+    };
+}
 const log = {};
 ['error', 'warn', 'info', 'debug'].forEach((lvl) => {
     log[lvl] = (...a) => {
@@ -81,9 +91,13 @@ class Settings {
         try { Object.assign(this.values, JSON.parse(fs.readFileSync(this.file, 'utf8'))); } catch (e) {}
         // one-time move of saved settings to the new default theme (M Tricolour); later choices are kept
         const th = this.item('theme');
-        if (th && fs.existsSync(this.file) && this.values._themeV !== 2) {
-            this.values.theme = th.default; this.values._themeV = 2;
-            try { fs.writeFileSync(this.file, JSON.stringify(this.values, null, 1)); } catch (e) { /* read-only */ }
+        if (th && this.values._themeV !== 2) {
+            const saved = fs.existsSync(this.file);
+            this.values._themeV = 2;            // (a fresh install has the default: the mark is saved with its first setting)
+            if (saved) {
+                this.values.theme = th.default;
+                try { fs.writeFileSync(this.file, JSON.stringify(this.values, null, 1)); } catch (e) { /* read-only */ }
+            }
         }
         // a setting with "reset": n in app.json goes back to its default once when n changes
         // (a new default reaches cars that saved the old one); later choices are kept
@@ -497,6 +511,15 @@ async function runInner(impl) {
     }
     await app.start();
     active();
+    if (!app.rhmiApplication) {
+        // The SDK did not create the app's screens: nothing can be shown. Stay up (idle) rather than throw: a
+        // crash makes CorruptAppsHandler wipe the app's data, and a second one uninstalls it (issue #39).
+        log.error('the SDK created no RHMI application, so the app has no screens and does not start. ' +
+            'Causes: the SDK config has rhmiLoadingEnabled off (an SDK extracted from a newer donor app; build.py ' +
+            'turns it on - rebuild the app), a CONFIG_STATE start, or the HMI could not load the app\'s resources ' +
+            '(see the SDK_ lines above). Idle until MainApp stops it.');
+        return;
+    }
     const ui = new Ui(app);
     const settings = new Settings(SPEC.settings);
     const display = new Display(ui, log, SPEC, settings, () => themes.theme(settings.get('theme')));
@@ -516,7 +539,8 @@ async function runInner(impl) {
         controller: { grab(on) { display.grab(on); }, onInput(fn) { display.onCcu = fn; } },
         /**
          * onTab(fn): fn(i) when page tab i is tapped on the touchscreen (renderer with touch
-         * routing), or pressed with the controller after turning onto it.
+         * routing), or pressed with the controller after turning onto it. Where the kit runs the
+         * screen, fn(i, true) when that tap or press closed a sheet (Settings) over the page.
          */
         onTab(fn) { display.onTab = fn; },
         /** onTap(fn): fn(x, y) for a tap on the page (app drawing px), where the kit runs the screen. */

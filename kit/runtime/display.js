@@ -161,18 +161,18 @@ class Display {
         const gpu = this.gpu = new RenderClient(this.spec.id, this.log, Object.assign({ native }, file ? { file } : {}));
         gpu.on('ready', () => { if (this.gpu !== gpu) return; this._place(); this._syncVisible(); this._grab(); });
         gpu.on('tick', () => { if (this.gpu === gpu) { this.tickT = Date.now(); this.tickHandlers.forEach((fn) => fn()); } });
-        gpu.on('close', () => { if (this.gpu === gpu) { this.blocked = false; this._lost(); } });
+        gpu.on('close', () => { if (this.gpu === gpu) { clearTimeout(this.frontTimer); this.blocked = false; this._lost(); } });
         gpu.on('stats', (s) => { this.gpuStats = s; });
         // mgu-render/1: the renderer shows the app only while its foreground gate has it in front. A screen
         // that stays shown here while the gate says otherwise (seen: a leftover install claiming the same
         // RHMI uuid, which the gate then ignores) is drawn in the HMI's own image until the gate agrees.
         gpu.on('state', (st) => {
             if (this.gpu !== gpu) return;
+            clearTimeout(this.frontTimer);
             if (st.front) {
                 if (this.blocked) { this.blocked = false; this.log.info('display: renderer has the app in front again'); this.lastWords = null; this._syncVisible(); this._grab(); this._hmiBar(); }
                 return;
             }
-            clearTimeout(this.frontTimer);
             this.frontTimer = setTimeout(() => {
                 if (this.gpu !== gpu || gpu.onScreen || this.blocked || !this._shown()) return;
                 this.blocked = true;
@@ -224,8 +224,9 @@ class Display {
     _openTab(i) {
         const tl = this._tabList();
         if (i === tl.settings) { if (!(this.sheet && this.sheet.settings)) this._click('BTN_SETTINGS'); return; }
+        const closed = !!this.sheet;
         this.closeSheet();
-        if (this.onTab) try { Promise.resolve(this.onTab(i)).catch((e) => this.log.error('tab', e)); } catch (e) { this.log.error('tab', e); }
+        if (this.onTab) try { Promise.resolve(this.onTab(i, closed)).catch((e) => this.log.error('tab', e)); } catch (e) { this.log.error('tab', e); }
     }
     /**
      * What the controller's knob goes through, in order: the header's tabs, the page's targets, the bar. A
@@ -270,7 +271,10 @@ class Display {
         this.tickHandlers.forEach((fn) => fn());         // the app draws its next frame
         if (sh.onClose) try { sh.onClose(); } catch (e) { this.log.error(e); }
     }
-    _sheetResult(res) {
+    /** Run fn (the sheet's press, back or a target's act; from the socket's data handler) and act on what it returns. */
+    _sheetResult(fn) {
+        let res;
+        try { res = fn(); } catch (e) { res = Promise.reject(e); }
         Promise.resolve(res).then((v) => { if (v === 'close') this.closeSheet(); else this._paintSheet(); })
             .catch((e) => { this.log.error('sheet', e); this._paintSheet(); });
     }
@@ -327,8 +331,8 @@ class Display {
                 return;
             }
             if (d) { this.sheet.move(d); this._paintSheet(); }
-            if (press) this._sheetResult(this.sheet.press());
-            if (tilt === 'W') this._sheetResult(this.sheet.back());
+            if (press) this._sheetResult(() => this.sheet.press());
+            if (tilt === 'W') this._sheetResult(() => this.sheet.back());
             return;
         }
         // pushed up / down / left / right: the nearest place that way; left with nothing there goes back (leaves the app)
@@ -443,7 +447,7 @@ class Display {
                 if (bar && was === key) { this._click(bar.id); return; }
                 if (this.sheet) {
                     const i = (this.sheetTargets || []).findIndex(inside);
-                    if (i >= 0 && was === key) this._sheetResult(this.sheetTargets[i].act());
+                    if (i >= 0 && was === key) this._sheetResult(() => this.sheetTargets[i].act());
                     return;
                 }
                 if (was && was.indexOf('bar:') === 0) return;
@@ -556,6 +560,7 @@ class Display {
         this._hmiBar();
         this.recorders.clear();             // text sizes depend on the scale
         this.app = null; this.outRec = null;
+        this.lastWords = null;              // a new placement (or its dropped resources) needs a frame, the same or not
         this.log.info('display: renderer placement ' + JSON.stringify(pl) + ' (layout ' + v + ')');
         // (only a real change: hideButton places again for every button it hides)
         const key = JSON.stringify([pl, this.own(), this.screen ? this.buttons().map((b) => b.id) : []]);
@@ -572,6 +577,7 @@ class Display {
         if (pl.oy === oy) return;
         pl.oy = oy;
         this.gpu.place(pl);                 // (the same scale: the renderer keeps our resources)
+        this.lastWords = null;              // the renderer draws the page at the new oy with the next frame
     }
 
     /** the screen is up and not covered by an HMI popup */
@@ -676,7 +682,7 @@ class Display {
         // unchanged frame (parked car, steady values): nothing to send - but at least one a
         // second, the renderer hides an app that goes quiet for 3 s (hung app over the HMI)
         const now = Date.now();
-        if (!force && this.lastWords && now - this.lastSent < 1000 && this.lastWords.length === w.length && Buffer.from(w.buffer, w.byteOffset, w.byteLength).equals(this.lastWords)) return;
+        if (!force && this.lastWords && now - this.lastSent < 1000 && this.lastWords.length === w.byteLength && Buffer.from(w.buffer, w.byteOffset, w.byteLength).equals(this.lastWords)) return;
         this.lastSent = now;
         this.gpu.frame(out);
         this.lastWords = Buffer.from(Buffer.from(w.buffer, w.byteOffset, w.byteLength));

@@ -99,10 +99,16 @@ BACKUP_ROOT=${BACKUP_ROOT:-$SELF_DIR/backups}
 TMP=${TMPDIR:-/tmp}/mgu-app-install.$$
 CHANGED=0
 NEED_RESTART=0
+DONE_RESTART=0         # install: the apps already installed need the restart (an error later says so)
 
 say()  { echo "[mgu-app] $*"; }
 warn() { echo "[mgu-app] WARNING: $*" >&2; }
-die()  { echo "[mgu-app] ERROR: $*" >&2; rm -rf "$TMP"; exit 1; }
+die()  {
+    echo "[mgu-app] ERROR: $*" >&2; rm -rf "$TMP"
+    # not restarted here: the app that failed may be an update half replaced (it would start broken)
+    [ $DONE_RESTART = 1 ] && echo "[mgu-app] the apps installed before this error are kept; they start after: sh $0 apply" >&2
+    exit 1
+}
 
 [ "$(id -u)" = 0 ] || die "run as root"
 [ -d "$MAIN" ] || die "$MAIN not found - is this an MGU with the OAP platform (and /var/opt/public mounted)?"
@@ -134,8 +140,8 @@ backup() {
     ts=$(date +%Y%m%d-%H%M%S)
     B=$BACKUP_ROOT/$ts
     mkdir -p "$B" || die "cannot create backup dir $B"
-    cp -p "$UIDS" "$B/uids.txt"
-    tar czf "$B/registry.tgz" -C "$MAIN/data" apps 2>/dev/null
+    cp -p "$UIDS" "$B/uids.txt" || die "cannot back up $UIDS - nothing changed"
+    tar czf "$B/registry.tgz" -C "$MAIN/data" apps || die "cannot back up $REG - nothing changed"
     [ -f "$CUSTOM" ] && cp -p "$CUSTOM" "$B/custom_apps.json"
     echo "$B" > "$BACKUP_ROOT/latest"
     say "backup: $B"
@@ -378,11 +384,16 @@ install_one() {
     rm -rf "$TMP"
 }
 
+uninstall_check() {    # <id>: dies unless it is installed and ours; sets u
+    u=$(uid_of "$1")
+    [ -n "$u" ] || die "$1 is not installed"
+    is_ours "$1" "$u" || die "$1 is a BMW app (uid $u); this tool only removes apps it installed"
+}
+
 uninstall_one() {
     id=$1
-    u=$(uid_of "$id")
-    [ -n "$u" ] || die "$id is not installed"
-    is_ours "$id" "$u" || die "$id is a BMW app (uid $u); this tool only removes apps it installed"
+    # checked (uninstall_check) before the platform stopped: nothing here may die, the platform must start again
+    u=$(uid_of "$id"); [ -n "$u" ] || return 0      # (an id given twice: gone already)
     sed -i "/^$u=$id\$/d" "$UIDS"
     rm -f "$REG/$id.json"
     custom_list del "$id"
@@ -422,6 +433,7 @@ restore() {
     B=${1:-}
     [ -n "$B" ] || B=$(cat "$BACKUP_ROOT/latest" 2>/dev/null)
     [ -n "$B" ] && [ -f "$B/uids.txt" ] || die "no backup found (looked in $BACKUP_ROOT)"
+    tar tzf "$B/registry.tgz" >/dev/null || die "$B/registry.tgz is damaged - nothing restored"
     say "restoring registry from $B"
     # remove app dirs that the backup did not know about (installed after it)
     sed 's/\r//' "$UIDS" | while IFS='=' read -r u id || [ -n "$u" ]; do
@@ -826,13 +838,16 @@ apply() {
 cmd=${1:-}; [ $# -gt 0 ] && shift
 case "$cmd" in
     install)   [ $# -gt 0 ] || die "usage: $0 install <app.mgu>..."
-               backup; for f in "$@"; do install_one "$f"; done
+               backup; for f in "$@"; do install_one "$f"; DONE_RESTART=$NEED_RESTART; done
+               DONE_RESTART=0
                patch_active || warn "provisioning hook not active: MainApp will hide the app. Run: sh $0 patch"
                if [ $NEED_RESTART = 1 ]; then apply; else say "updated in place - the new version runs on the next tile tap"; fi ;;
     verify)    [ $# -gt 0 ] || die "usage: $0 verify <app.mgu>..."
                bad=0; for f in "$@"; do verify_one "$f" || bad=1; done
                exit $bad ;;
     uninstall) [ $# -gt 0 ] || die "usage: $0 uninstall <app-id>..."
+               # every id checked first: an error after the stop below would leave the platform stopped
+               for a in "$@"; do uninstall_check "$a"; done
                # stop the platform first so MainApp doesn't see the app vanish
                # under it (it would try to "recover" it)
                backup; [ "${NO_RESTART:-0}" = 1 ] || systemctl stop oapcontroller.service

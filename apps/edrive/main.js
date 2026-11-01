@@ -134,11 +134,13 @@ mgu.run({
         if (st.learn && st.rangeV !== 2) { const f = Math.min(1, 10 / st.learn.km); st.learn.km *= f; st.learn.pct *= f; }
         st.rangeV = 2;
         const model = new RangeModel(st);
-        let savedAt = 0;
+        let savedAt = 0, saved = JSON.stringify(st);
         const save = () => {
-            savedAt = Date.now();
-            try { fs.writeFileSync(STATE, JSON.stringify(st)); } catch (e) { log.warn('save: ' + e); }
+            savedAt = Date.now(); saved = JSON.stringify(st);
+            try { fs.writeFileSync(STATE, saved); } catch (e) { log.warn('save: ' + e); }
         };
+        // MainApp's shutdown: what changed since the last save (the last charge reading, learning) goes with it
+        process.on('exit', () => { if (JSON.stringify(st) !== saved) save(); });
         const live = { soc: null, socT: 0, soh: G.isNum(st.soh) ? st.soh : null, sohT: st.sohT || 0, v12: null, v12T: 0, ambient: null, speed: null, rpm: null, rpmT: 0,
             climate: null, ac: null, seats: {}, wheel: null, blower: null, blowerTop: 8, pd: null, batt: null, hvV: null,
             pace: null, lastMove: 0, raw: {}, standSince: 0, acRaw: null, acKw: null, lscV: null, lscVT: 0 };
@@ -359,13 +361,16 @@ mgu.run({
             if (pumping) return;
             pumping = true;
             while (queue.length) {
-                const j = queue.shift();
+                const j = queue.shift(), t0 = Date.now();
                 try { j.res(await j.fn()); } catch (e) { j.rej(e); }
+                // one turn that holds the link this long delays every read behind it (the live power too): say which
+                const ms = Date.now() - t0;
+                if (ms > 1500) { exclusive.stalls = (exclusive.stalls || 0) + 1; log.warn('link held ' + ms + ' ms by ' + j.label + (queue.length ? ' (' + queue.length + ' waiting)' : '')); }
             }
             pumping = false;
         }
-        const exclusive = (fn, urgent) => new Promise((res, rej) => {
-            const j = { fn, res, rej };
+        const exclusive = (fn, urgent, label) => new Promise((res, rej) => {
+            const j = { fn, res, rej, label: label || (urgent ? 'urgent' : 'read') };
             if (urgent) queue.unshift(j); else queue.push(j);
             pump();
         });
@@ -377,7 +382,8 @@ mgu.run({
          * while the head unit slept shows up as a jump at the next start: that jump counts even when
          * the car is already moving by the first reading (the diagnostic link takes a while to come up),
          * as readings come every few seconds while the car is on and regen never adds that much between them. */
-        const chargeKwh = (from, to) => (G.isNum(live.soh) ? (to - from) / 100 * settings.get('designKwh') * live.soh / 100 : null);
+        // (no health read yet: 100 %, as the range)
+        const chargeKwh = (from, to) => (to - from) * kwhPerPct();
         function closeSession() {
             const s = st.session;
             st.session = null;
@@ -386,10 +392,9 @@ mgu.run({
                 st.log = (st.log || []).concat([st.lastCharge]).slice(-LOG_MAX);
                 log.info('charge ' + s.from.toFixed(1) + ' -> ' + s.to.toFixed(1) + ' %');
             }
-            save();
         }
         function onSoc(soc, now) {
-            const prev = st.lastSoc, moving = G.isNum(live.speed) && live.speed > 3;
+            const prev = st.lastSoc, open = st.session, logged = st.lastCharge, moving = G.isNum(live.speed) && live.speed > 3;
             // since the last reading with the engine off throughout (and the car awake: rpm signal live):
             // standing / creeping teaches the climate + on-board draw per hour, driving the use per km
             const h = (now - (st.lastSocT || 0)) / 3600000;
@@ -415,7 +420,6 @@ mgu.run({
                 } else if (soc > prev + 0.3 && !moving) {
                     if (!st.session) st.session = { from: prev, fromT: st.lastSocT || now };
                     st.session.to = soc; st.session.toT = now;
-                    save();
                 } else if (st.session && (soc < st.session.to - 2 || moving)) {
                     // ends when driving off or on a real drop; small dips while parked (cabin
                     // pre-conditioning, display wobble) keep the session open
@@ -423,7 +427,9 @@ mgu.run({
                 }
             }
             st.lastSoc = soc; st.lastSocT = now;
-            if (now - savedAt > 120000) save();
+            // a charge logged, a session opened, grown or closed: saved with this reading, so battery.json never holds
+            // a logged charge with the reading before it (the next start would log the same charge again)
+            if (st.lastCharge !== logged || st.session !== open || (open && open.toT === now) || now - savedAt > 120000) save();
         }
         /** The charge to show: one in progress (big enough to count), else the last finished one. */
         function lastCharge() {

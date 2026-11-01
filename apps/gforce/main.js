@@ -33,7 +33,10 @@ mgu.run({
         try { rec = JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch (e) { /* first start */ }
         const demoRec = {};
         let saveTimer = null;
-        const saveSoon = () => { if (!saveTimer) saveTimer = setTimeout(() => { saveTimer = null; try { fs.writeFileSync(FILE, JSON.stringify(rec)); } catch (e) { log.warn('save: ' + e); } }, 5000); };
+        const saveNow = () => { clearTimeout(saveTimer); saveTimer = null; try { fs.writeFileSync(FILE, JSON.stringify(rec)); } catch (e) { log.warn('save: ' + e); } };
+        const saveSoon = () => { if (!saveTimer) saveTimer = setTimeout(saveNow, 5000); };
+        // shutdown exits 200 ms after MainApp asks (kit mgu.js): a record still waiting for its 5 s goes now
+        process.on('exit', () => { if (saveTimer) saveNow(); });
 
         /* ---------- session ---------- */
         let S;

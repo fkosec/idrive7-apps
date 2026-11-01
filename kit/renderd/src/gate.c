@@ -25,13 +25,25 @@ static size_t len;
 int gate_start(const char *command)
 {
     int o[2], i[2];
-    if (pipe2(o, O_CLOEXEC) || pipe2(i, O_CLOEXEC)) {
+    if (pipe2(o, O_CLOEXEC)) {
         log_error("foreground gate: pipe: %s", strerror(errno));
+        return -1;
+    }
+    if (pipe2(i, O_CLOEXEC)) {
+        log_error("foreground gate: pipe: %s", strerror(errno));
+        close(o[0]);
+        close(o[1]);
         return -1;
     }
     pid = fork();
     if (pid < 0) {
+        /* no child: gate_stop() must not signal pid -1 (every process) */
         log_error("foreground gate: fork: %s", strerror(errno));
+        pid = 0;
+        close(o[0]);
+        close(o[1]);
+        close(i[0]);
+        close(i[1]);
         return -1;
     }
     if (pid == 0) {
@@ -125,7 +137,7 @@ int gate_read(void)
 
 void gate_stop(void)
 {
-    if (!pid)
+    if (pid <= 0)
         return;
     if (in >= 0)
         close(in);

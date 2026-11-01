@@ -78,7 +78,8 @@ mgu.run({
         let timer;
         const newTimer = () => {
             store = feedDemo ? demoStore : saved;
-            timer = new RunTimer(splits(), { rollout: settings.get('rollout'), onDone });
+            // a new launch: its own peak, and its splits compared with the best (not run 1's NEW BEST)
+            timer = new RunTimer(splits(), { rollout: settings.get('rollout'), onDone, onLaunch: () => { peakG = 0; lastNewBest = {}; } });
             lastNewBest = {};
         };
 
