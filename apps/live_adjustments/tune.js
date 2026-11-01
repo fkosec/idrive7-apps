@@ -83,7 +83,8 @@ class TuneControl {
      * round (BM3's 0x63 replies carry no address, so two reads in flight could swap answers). */
     _serial(fn) {
         this._ops++;
-        const p = this._queue.then(fn).finally(() => { this._ops--; });
+        const done = () => { this._ops--; };
+        const p = this._queue.then(fn).then((v) => { done(); return v; }, (e) => { done(); throw e; });   // (no Promise.finally on the car's Node 8)
         this._queue = p.catch(() => {});
         return p;
     }
@@ -95,7 +96,8 @@ class TuneControl {
         if (!this._refreshing) {
             this._refreshing = this._serial(() => {
                 this._refreshing = null; this._refreshRuns = true;
-                return this._refresh().finally(() => { this._refreshRuns = this._waitNote = false; });
+                const end = () => { this._refreshRuns = this._waitNote = false; };
+                return this._refresh().then((v) => { end(); return v; }, (e) => { end(); throw e; });
             });
         }
         return this._refreshing;

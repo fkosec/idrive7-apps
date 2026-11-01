@@ -107,7 +107,8 @@ class XDriveControl {
         }
         if (!jobs.length) return null;
         this.reading = true;
-        return Promise.all(jobs).finally(() => { this.reading = false; });
+        const done = () => { this.reading = false; };          // (no Promise.finally on the car's Node 8)
+        return Promise.all(jobs).then((v) => { done(); return v; }, (e) => { done(); throw e; });
     }
 
     _linkUp() { return !!(this.link && this.link.available && this.link.diag); }
