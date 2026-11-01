@@ -73,9 +73,10 @@ function drawButtons(cv, G, t, v, act, bottom) {
     let bx = (W - (modes.length * bw + (modes.length - 1) * gap)) / 2;
     for (const m of modes) {
         const on = m.k === v.requested;
+        const busy = !!v.busy && m.k !== 'OEM';     // OEM stays pressable: it is queued, never dropped
         const opts = on
-            ? { color: t.crit || '#ef2b2d', primary: true, key: 'la_' + m.k }   // selected = red
-            : { key: 'la_' + m.k };                                             // others = outline
+            ? { color: t.crit || '#ef2b2d', primary: true, key: 'la_' + m.k, busy }   // selected = red
+            : { key: 'la_' + m.k, busy };                                             // others = outline
         G.button(cv, t, bx, by, bw, bh, m.label, m.run || (() => {}), opts);
         bx += bw + gap;
     }

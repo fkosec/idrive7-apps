@@ -24,7 +24,7 @@
 const mgu = require('./kit/mgu');
 const { withAlpha } = require('./kit/canvas');
 const G = require('./kit/gauges');
-const { Diag, hex, NRC } = require('./kit/diag');
+const { Diag, hex, NRC, replyTo } = require('./kit/diag');
 const { fitText } = require('./kit/text-layout');
 const { cardSheet } = require('./kit/sheet');
 
@@ -155,7 +155,7 @@ mgu.run({
         }
         /** the cluster's CBS record: { id: {avail, count} } */
         async function readCbs(d) {
-            const r = await d.physical(KOMBI_ECU, 0x22, [0x10, 0x01], 5000, (u) => u[0] !== 0x62 || u[1] === 0x10);
+            const r = await d.physical(KOMBI_ECU, 0x22, [0x10, 0x01], 5000, replyTo(0x22, [0x10, 0x01]));
             if (!r || r[0] !== 0x62) throw new Error(nrc(r));
             const out = {};
             for (let i = 3; i + 12 <= r.length; i += 12) out[r[i]] = { avail: r[i + 5], count: r[i + 4] & 0x1F };
@@ -172,7 +172,7 @@ mgu.run({
             showMsg('Asking the instrument cluster what can be reset...');
             try {
                 const d = await link();
-                const r = await d.physical(KOMBI_ECU, 0x22, [0x10, 0x02], 5000, (u) => u[0] !== 0x62 || u[1] === 0x10);
+                const r = await d.physical(KOMBI_ECU, 0x22, [0x10, 0x02], 5000, replyTo(0x22, [0x10, 0x02]));
                 if (!r || r[0] !== 0x62) throw new Error(nrc(r));
                 const ok = [];
                 for (let i = 3; i + 3 <= r.length; i += 3) {
@@ -204,7 +204,7 @@ mgu.run({
                 const before = (await readCbs(d).catch(() => ({})))[it.id];
                 const r = await d.physical(KOMBI_ECU, 0x2E,
                     [0x10, 0x01, 0x01, it.id, 0x64, 0x1F, 0x80, 0x00, 0x0F, 0xFF, 0x0F, 0x3F, 0xFF, 0x00], 6000,
-                    (u) => u[0] !== 0x6E || u[1] === 0x10);
+                    replyTo(0x2E, [0x10, 0x01]));
                 log.info('reset ' + it.name + ': ' + (r ? r.map((x) => hex(x)).join(' ') : 'no reply'));
                 if (!r || r[0] !== 0x6E) throw new Error(nrc(r));
                 const after = (await readCbs(d).catch(() => ({})))[it.id];

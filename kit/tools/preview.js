@@ -20,7 +20,8 @@ const { headUnit } = require('./hu-stub');
 
 const stage = path.resolve(process.argv[2] || 'dist/car_vitals');
 const args = process.argv.slice(3);
-const out = path.resolve(args[0] && !args[0].startsWith('BTN') && !args[0].startsWith('--') && !/^(wait=|render$)/.test(args[0]) ? args.shift() : 'preview');
+// outDir is optional: a first argument that is an option, a step or a component name (BTN_PAGE, SET_THEME) is not it
+const out = path.resolve(args[0] && !args[0].startsWith('--') && !/^(wait=|frames=|render$|[A-Z][A-Z0-9]*_)/.test(args[0]) ? args.shift() : 'preview');
 const sets = {};
 const clicks = [];
 for (let i = 0; i < args.length; i++) {

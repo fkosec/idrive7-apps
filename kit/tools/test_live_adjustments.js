@@ -11,9 +11,13 @@ const { XDriveControl } = require('../../apps/live_adjustments/xdrive');
 function dme(kind) {
     const calls = [];
     const memory = { D001D006: [1, 1], D001D099: [0], D001D116: Array(24).fill(0) };   // BM3 ROM 011000 layout
+    let inflight = 0;
     const physical = async (target, sid, data) => {
         assert.strictEqual(target, 0x12);
         calls.push([sid].concat(data).map((b) => b.toString(16).padStart(2, '0')).join(' '));
+        d.maxInflight = Math.max(d.maxInflight, ++inflight);
+        await new Promise(setImmediate);                                // the DME answers later
+        inflight--;
         const addr = () => Buffer.from(data.slice(1, 5)).toString('hex').toUpperCase();
         if (kind === 'bm3') {
             if (sid === 0x2C) return [0x6C, 0x02, 0xF3, 0x01];
@@ -38,7 +42,8 @@ function dme(kind) {
             return { ok: true, sid: r[0], data: r.slice(1) };
         },
     };
-    return { calls, memory, link };
+    const d = { calls, memory, link, maxInflight: 0 };
+    return d;
 }
 
 async function setup(kind, tuner, available, rpm) {
@@ -223,6 +228,13 @@ async function xdriveChecks() {
     assert.strictEqual(s.tune.noteType, 'warn');
     assert(!s.d.calls.some((c) => /^(2c|3d|3e|2e)/.test(c)), 'MHD never gets a BM3 request');
 
+    // A second press while a command is in flight is not sent (it would share the first one's echo).
+    s = await setup('mhd', 'mhd');
+    await Promise.all([s.tune.setMap(2), s.tune.setMap(3), s.tune.setCooling(true)]);
+    assert.deepStrictEqual(s.d.calls, ['2f 01 01'], 'a second MHD press went out during a command');
+    assert.strictEqual(s.tune.map, 2);
+    assert.strictEqual(s.tune.cooling, null);
+
     // Max Cooling ON needs the engine running (live rpm over 500); OFF is always allowed.
     for (const r of [null, 0, 450, 500]) {
         s = await setup('mhd', 'mhd', true, r);
@@ -288,6 +300,30 @@ async function xdriveChecks() {
     await s.tune.refresh();
     assert.strictEqual(s.tune.map, 2);
 
+    // One DME conversation at a time (BM3's 0x63 replies carry no address): a refresh waits for the
+    // command in flight, two refreshes run as one, and a press during a refresh is not sent.
+    s = await setup('bm3', 'bm3');
+    s.d.maxInflight = 0;
+    const press = s.tune.setMap(4), again = s.tune.refresh();
+    await s.tune.setMap(1);
+    await Promise.all([press, again]);
+    assert.strictEqual(s.d.maxInflight, 1, 'a refresh ran alongside a command');
+    assert.deepStrictEqual(s.d.memory.D001D006, [3, 1]);
+    assert.strictEqual(s.tune.map, 4);
+    assert.strictEqual(s.tune.busy, false);
+    s.d.calls.length = 0; s.d.maxInflight = 0;
+    await Promise.all([s.tune.refresh(), s.tune.refresh()]);
+    assert.strictEqual(s.d.maxInflight, 1, 'two refreshes overlapped');
+    assert.strictEqual(s.d.calls.filter((c) => c.startsWith('2c')).length, 1);
+    const pending = s.tune.refresh();
+    assert.strictEqual(s.tune.view().busy, true);
+    await s.tune.applyBurbles(false);
+    assert.strictEqual(s.tune.view().note, 'Reading the DME - press again in a moment', 'a press during a refresh did nothing on screen');
+    await pending;
+    assert.notStrictEqual(s.tune.view().note, 'Reading the DME - press again in a moment', 'the busy note outlived the refresh');
+    assert(!s.d.calls.some((c) => c.startsWith('3d')), 'a press was sent during a refresh');
+    assert.strictEqual(s.tune.verified, true);
+
     await xdriveChecks();
-    console.log('Live Adjustments tune checks passed (off / MHD echo / cooling rpm gate / BM3 read-back + ASD / wrong tune / untuned / late link / xDrive).');
+    console.log('Live Adjustments tune checks passed (off / MHD echo / cooling rpm gate / BM3 read-back + ASD / wrong tune / untuned / late link / one request at a time / xDrive).');
 })().catch((e) => { console.error(e); process.exit(1); });

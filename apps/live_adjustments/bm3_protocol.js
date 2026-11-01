@@ -34,9 +34,18 @@ class Bm3Protocol {
         this.config = config || {};
         this.rom = null;
         this.profile = null;
+        this._last = Promise.resolve();
     }
 
-    async request(sid, data, prefix, timeoutMs) {
+    /** One request at a time: a 0x63 reply carries no address, so two 0x23 reads in flight could
+     * take each other's answers. */
+    request(sid, data, prefix, timeoutMs) {
+        const r = this._last.then(() => this._request(sid, data, prefix, timeoutMs));
+        this._last = r.catch(() => {});
+        return r;
+    }
+
+    async _request(sid, data, prefix, timeoutMs) {
         if (!this.diag.available) throw new Error('MGU diagnostic transport unavailable');
         const reply = await this.diag.physical(DME, sid, data, timeoutMs || 4500,
             (u) => (u[0] === sid + 0x40 && (prefix || []).every((b, i) => u[i + 1] === b))

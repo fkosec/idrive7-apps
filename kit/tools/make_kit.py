@@ -35,10 +35,10 @@ CAR_FILES = [('car/deploy-car.sh', 'deploy-car.sh'), ('mgu-app-install.sh', 'mgu
              ('mainapp-patch.js', 'mainapp-patch.js'), ('car/README.txt', 'README.txt')]
 
 
-def source_hash():
+def source_hash(parts=(('src', None), ('inputgate', ('.cpp',)), ('protocol', ('.xml',)), ('docker', None), ('', ('Makefile',)))):
     """Fingerprint of everything the renderer binary is built from (line endings ignored)."""
     files = []
-    for sub, exts in (('src', None), ('inputgate', ('.cpp',)), ('protocol', ('.xml',)), ('docker', None), ('', ('Makefile',))):
+    for sub, exts in parts:
         d = os.path.join(RENDERD, sub)
         for n in sorted(os.listdir(d)):
             p = os.path.join(d, n)
@@ -57,7 +57,8 @@ def prebuilt_hash():
 
 
 def docker_build():
-    """Compile kit/renderd in Docker (x86-64 like the head unit). Returns (ok, output)."""
+    """Compile kit/renderd in Docker (x86-64 like the head unit). Returns (ok, output, stale): stale = built in an
+    image that could not be made again from this docker/."""
     plat = ['--platform', 'linux/amd64']
     user = ['-u', '%d:%d' % (os.getuid(), os.getgid())] if hasattr(os, 'getuid') else []
     log = []
@@ -65,10 +66,20 @@ def docker_build():
         p = subprocess.run(cmd, cwd=RENDERD, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         log.append(p.stdout.decode('utf-8', 'replace'))
         return p.returncode == 0
-    ok = (run(['docker', 'image', 'inspect', 'mgu-renderd-build'])
-          or run(['docker', 'build'] + plat + ['-t', 'mgu-renderd-build', 'docker']))
+    # the image is made again when docker/ changed: its label holds the docker/ it was built from
+    tag = source_hash((('docker', None),))
+    p = subprocess.run(['docker', 'image', 'inspect', '-f', '{{index .Config.Labels "mgu-renderd.docker"}}', 'mgu-renderd-build'],
+                       cwd=RENDERD, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    have = p.stdout.decode('utf-8', 'replace').strip()
+    ok = have == tag or run(['docker', 'build'] + plat + ['--label', 'mgu-renderd.docker=' + tag, '-t', 'mgu-renderd-build', 'docker'])
+    stale = False
+    if not ok and p.returncode == 0:
+        # offline, or the base image gone: the image there still builds the renderer (one without the label
+        # predates it, its docker/ may well be the same)
+        print('   (could not rebuild the build image; using the existing one, made from an older or unknown docker/)')
+        ok = stale = True
     ok = ok and run(['docker', 'run', '--rm'] + plat + user + ['-v', RENDERD + ':/src', 'mgu-renderd-build', 'make'])
-    return ok and os.path.isfile(BUILT), ''.join(log)
+    return ok and os.path.isfile(BUILT), ''.join(log), stale
 
 
 def ask(why, fallback):
@@ -89,9 +100,14 @@ def pick_renderer():
     pre_ok = os.path.isfile(PRE) and have == want
     older = PRE if os.path.isfile(PRE) else None
     if shutil.which('docker'):
-        ok, log = docker_build()
+        ok, log, stale = docker_build()
         if ok:
-            if not pre_ok:
+            if not pre_ok and stale:
+                # prebuilt/ would claim this docker/ (SOURCE_SHA256) and no later run would make it again
+                print('\n'.join(log.strip().splitlines()[-15:]))
+                print('renderer: built in the older build image - kit/renderd/prebuilt/ NOT updated '
+                      '(fix the image build above, then run again)')
+            elif not pre_ok:
                 os.makedirs(PRE_DIR, exist_ok=True)
                 shutil.copyfile(BUILT, PRE)
                 shutil.copyfile(gate_of(BUILT), gate_of(PRE))

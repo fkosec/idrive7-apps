@@ -11,7 +11,7 @@
  *
  * Nothing here actuates the flap. Actuation lives in adapters.js and is gated there.
  */
-const { Diag, hex, NRC } = require('./kit/diag');
+const { Diag, hex, NRC, replyTo } = require('./kit/diag');
 
 const DME = 0x12;                 // DME engine (BMW diagnostic address)
 const DME2 = 0x13;                // second DME on some engines, kept for future use
@@ -58,7 +58,7 @@ class DiagLink {
     async readDid(did, timeoutMs) {
         if (!this.available) return { ok: false, nrc: null, reason: 'no diagnostic link' };
         try {
-            const reply = await this.diag.physical(this.dme, 0x22, did, timeoutMs || 2000);
+            const reply = await this.diag.physical(this.dme, 0x22, did, timeoutMs || 2000, replyTo(0x22, did));
             if (!reply || !reply.length) return { ok: false, nrc: null, reason: 'timeout' };
             if (reply[0] === 0x7F) return { ok: false, nrc: reply[2], reason: NRC[reply[2]] || ('NRC ' + hex(reply[2])) };
             // positive: 0x62 <did hi> <did lo> <data...>
@@ -117,7 +117,7 @@ class DiagLink {
     async sendToDme(sid, data, timeoutMs) {
         if (!this.available) return { ok: false, reason: 'no diagnostic link' };
         this.log.info('UDS -> DME ' + hex(sid) + ' ' + bytesToHex(data));
-        const reply = await this.diag.physical(this.dme, sid, data, timeoutMs || 3000);
+        const reply = await this.diag.physical(this.dme, sid, data, timeoutMs || 3000, replyTo(sid, data));
         if (!reply || !reply.length) return { ok: false, reason: 'timeout' };
         if (reply[0] === 0x7F) return { ok: false, nrc: reply[2], reason: NRC[reply[2]] || ('NRC ' + hex(reply[2])) };
         return { ok: true, sid: reply[0], data: reply.slice(1) };

@@ -82,8 +82,11 @@ module.exports = function live(ctx, sh) {
     const STATE = path.join(ctx.dataDir, 'live.json');
     let st = {};
     try { st = JSON.parse(fs.readFileSync(STATE, 'utf8')) || {}; } catch (e) { /* first run */ }
-    let savedAt = 0;
-    const save = () => { savedAt = Date.now(); try { fs.writeFileSync(STATE, JSON.stringify(st)); } catch (e) { log.warn('save: ' + e); } };
+    let savedAt = 0, saved = JSON.stringify(st);
+    const save = () => { savedAt = Date.now(); saved = JSON.stringify(st); try { fs.writeFileSync(STATE, saved); } catch (e) { log.warn('save: ' + e); } };
+    // what is measured while driving (use, otherKw) is saved every 5 min (flash), the rest at MainApp's shutdown
+    const USE_SAVE_MS = 300000;
+    process.on('exit', () => { if (JSON.stringify(st) !== saved) save(); });
 
     /* ---------- this part's own values (the battery unit's); the car's are eDrive's (L) ---------- */
     const live = { v: null, vT: 0, a: null, kw: null, kwT: 0, soc: null, cellV: null, cellT: null, coolant: null, limits: null, slowT: {} };
@@ -196,6 +199,7 @@ module.exports = function live(ctx, sh) {
                 const km = moving ? L.speed * h : 0, u = st.use || (st.use = { km: 0, kwh: 0 });
                 u.km += km; u.kwh += kw * h;
                 if (u.km > USE_KM) { u.kwh *= USE_KM / u.km; u.km = USE_KM; }
+                if (now - savedAt > USE_SAVE_MS) save();
                 useNow.push([now, km, kw * h]);
                 while (useNow.length && now - useNow[0][0] > NOW_S * 1000) useNow.shift();
             }
@@ -490,7 +494,7 @@ module.exports = function live(ctx, sh) {
     /** The on-board draw: learned while standing with climate, seats and wheel all off. */
     function learnBaseline(kw, now) {
         const d = { kw, engine: engineOn(), speed: L.speed };
-        const draw = standingDraw(d, now), c = comfortKw(live);
+        const draw = standingDraw(d, now), c = comfortKw(L);
         if (draw === null || L.climate !== false || c.seats || c.wheel || draw > 3) return;
         st.baseKw = G.isNum(st.baseKw) ? st.baseKw + (draw - st.baseKw) * 0.05 : draw;
         st.baseN = (st.baseN || 0) + 1;
@@ -523,6 +527,7 @@ module.exports = function live(ctx, sh) {
                 if (u && on) {
                     const o = G.clamp(kw - u.ac - u.heater - blowerKw(d) - c.seats - c.wheel, 0, 1.5);
                     st.otherKw = G.isNum(st.otherKw) ? st.otherKw + (o - st.otherKw) * 0.1 : o;
+                    if (now - savedAt > USE_SAVE_MS) save();
                 }
             }
             return { kw, how: 'measured', draw, est, u };

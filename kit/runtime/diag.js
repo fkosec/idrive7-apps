@@ -111,6 +111,9 @@ class Diag extends EventEmitter {
             finish = () => { clearTimeout(idle); clearTimeout(hard); this.removeListener('frame', onFrame); this.removeListener('tasError', onErr); resolve(replies); };
             kick = (ms) => { clearTimeout(idle); idle = setTimeout(finish, ms); };
             onFrame = (f) => {
+                // every app gets every frame: only this service's answer (or refusal) is a reply
+                if (f.uds[0] !== sid + 0x40 && !(f.uds[0] === 0x7F && f.uds[1] === sid)) return;
+                if (sid === 0x19 && f.uds[0] === 0x59 && f.uds[1] !== (data || [])[0]) return;   // 0x19 echoes its sub-function
                 const pending = f.uds[0] === 0x7F && f.uds[2] === 0x78;
                 if (!pending || !replies.has(f.ecu)) replies.set(f.ecu, f.uds);
                 if (opts && opts.onReply && !pending) opts.onReply(f.ecu, replies.size);
@@ -142,7 +145,8 @@ class Diag extends EventEmitter {
             };
             onFrame = (f) => {
                 if (f.ecu !== target) return;
-                if (f.uds[0] === 0x7F && f.uds[2] === 0x78) {
+                if (f.uds[0] === 0x7F && f.uds[2] === 0x78) {      // response pending: never the reply itself
+                    if (f.uds[1] !== sid) return;                       // another request's (another app's) 78
                     clearTimeout(t);
                     t = setTimeout(() => finish(null), opts && opts.pendingTimeoutMs || 10000);
                     return;
@@ -157,6 +161,16 @@ class Diag extends EventEmitter {
         if (!done && !t) t = setTimeout(() => finish(null), timeoutMs || 4000); // from when the transport took it
         return got;
     }
+}
+
+// Request bytes a positive reply echoes after sid + 0x40: sub-function (10 / 11 / 27), DID (22 / 2E), DID + control
+// parameter (2F: 6F 60FD 03 .. is OPEN's answer, not OEM's 6F 60FD 00), sub-function + RID (31).
+const ECHO = { 0x10: 1, 0x11: 1, 0x27: 1, 0x22: 2, 0x2E: 2, 0x2F: 3, 0x31: 3 };
+/** accept(uds) for physical(): every app gets every frame from the ECU (car_vitals polls the DME), so
+ * only this request's positive reply with its echo, or a refusal of this service, is the answer. */
+function replyTo(sid, data) {
+    const echo = (data || []).slice(0, ECHO[sid] || 0);
+    return (u) => (u[0] === sid + 0x40 && echo.every((b, i) => u[i + 1] === b)) || (u[0] === 0x7F && u[1] === sid);
 }
 
 /**
@@ -184,4 +198,4 @@ function statusInfo(b) {
     return { label: 'HISTORY', sev: 'dim' };
 }
 
-module.exports = { Diag, parseDtcReply, statusInfo, toBytes, hex, NRC, ALL };
+module.exports = { Diag, parseDtcReply, statusInfo, toBytes, hex, NRC, ALL, replyTo };
