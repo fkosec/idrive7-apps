@@ -9,7 +9,7 @@ driven from the HMI by the companion app
 CarPlay sends the cluster map only as H.264 video, with no map data, so this
 is a video pipeline:
 
-1. **Ungate the second display.** A reversible, SHA-pinned patch to
+1. **Ungate the second display.** A reversible patch to
    `/usr/bin/carplay` makes `KI_KOMBI_VARIANT` 7 resolve to a supported
    cluster variant, makes CarPlay start the cluster stream itself, and
    advertises the size the map is shown at ([patch/PATCH.md](patch/PATCH.md)).
@@ -17,9 +17,10 @@ is a video pipeline:
    AVB stream `media_transport.avb_streaming.15`; the render joins it as an
    extra receiver, in-process. It also listens on a local UDP port and a FIFO,
    which other sink patches can point at.
-3. **Decode.** RTP is depacketised to H.264 Annex B (`src/rtp_h264.*`) and
-   decoded with the unit's Intel Media SDK / VAAPI on `/dev/dri/renderD128`
-   to the picture's own Y, U and V planes.
+3. **Decode.** The receive threads only queue each packet; one decode
+   thread depacketises RTP to H.264 Annex B (`src/rtp_h264.*`) and decodes it
+   with the unit's Intel Media SDK / VAAPI on `/dev/dri/renderD128` to the
+   picture's own Y, U and V planes, through any lost packets ("Losses").
 4. **Draw.** Each frame goes to the shared cluster renderer,
    [cluster-render](../cluster-render), as a
    video layer (`src/map_feed.*`). The renderer owns the RAMSES participant,
@@ -30,7 +31,7 @@ is a video pipeline:
 Install the app `robertn_waze_cluster` from the catalog of
 [idrive-apps](https://github.com/robertnisipeanu/idrive-apps)
 through the [mgu Store](https://github.com/robertnisipeanu/mgu-store). The
-app requires this tool (0.5.0); this tool requires `cluster-render` 0.1.0 and
+app requires this tool (0.6.0); this tool requires `cluster-render` 0.3.2 and
 `mgu-deploy` 0.7.0, the deploy tool version that runs activate and deactivate
 hooks. Requirements resolve across catalog sources.
 
@@ -40,9 +41,9 @@ kills or restarts CarPlay. The Store shows a restart pending; the app shows
 `Patch pending — reboot to activate`. One head-unit start runs the patched
 CarPlay and starts this tool's services. The hook leaves CarPlay as it is,
 and the app says why and offers Enable map, when Disable map was used, when
-the binary is not the known build or something else modified it, or when
-`carplay.service` starts another program. An update brings an older patch of
-ours up to date.
+the patcher cannot find or recognise one of its edit sites in the binary or
+something else modified it, or when `carplay.service` starts another program.
+An update brings an older patch of ours up to date.
 
 **Remove.** In the Store, remove the app, then the tool (refused while the
 app is installed). `patchd.js deactivate` reverts only our byte regions,
@@ -60,6 +61,14 @@ when CarPlay next starts. `patchd` restarts CarPlay at once only where recmgr
 loaded `carplay` in both restart lists at this boot (PATCH.md "Activation");
 otherwise the app shows **Restart head unit**, a normal system reboot.
 
+Set **Instrument cluster > Central display area** to **Map view**: the
+cluster shows the stock map, the Waze map replaces it while CarPlay's cluster
+stream is live, and the stock map is back when the stream ends. **Off** works
+too, with an empty centre instead of the stock map. With Route preview or
+Assisted Driving View the cluster's own content takes the centre. After
+changing the setting, CarPlay may need reconnecting before the map returns:
+the change can freeze the phone's cluster stream (below).
+
 Then connect the iPhone to CarPlay. Waze needs its server-side flag 1006 for
 the alternate display. The phone sends SPS, PPS and an IDR only at the start
 of a stream, so the render service runs from boot, joins the media bus at
@@ -67,13 +76,37 @@ once (retrying every second until the AVB bridge is up), and decodes from the
 stream's first SPS whether or not the map is shown. The app need not be open.
 
 The map comes up at the first decoded frame in the native central-map slot
-`0x100` (scene `0x010004f0`, 1088x480), under the gauges. `stall_ms` (6 s)
-after the frames stop it is taken down and the slot returns to the cluster's
-own content; the next stream maps it again. While frames flow, a session the
-cluster ends (the stock map taking the slot back, a refusal, no answer) is
-started again after 2, 5, 10, 20, then every 30 s. The app shows
-`Starting map…` while the renderer starts, and a map error only when the
-renderer stays unreachable for 15 s.
+`0x100` (scene `0x010004f0`, 1088x480), under the gauges, and stays while the
+stream is live: while carplay holds the phone's connection for the cluster
+stream, TCP port 6031 owned by carplay's uid 13002 in `/proc/net/tcp6`,
+however few frames come (how often a static map sends a frame depends on the
+phone: one about every ten seconds, another about 30 a second).
+When that connection ends (the phone unplugged, the session or the stream
+ended) the map is taken down at the next check, once a second, and the slot
+returns to the cluster's own content; the next stream maps it again. No
+frame for `idle_ms` (60 s) takes it down too. Without that connection
+(carplay took another port) or if `/proc/net` cannot be read, a frame within
+`stall_ms` (6 s) counts as live. That the phone keeps the connection through
+a static map and closes it when the stream ends is still to be confirmed on
+the car.
+
+While the map is up, a session the cluster ends (the stock map taking the
+slot back, a refusal, no answer) is started again after 2, 5, 10, 20, then
+every 30 s. The app shows `Starting map…` while the renderer starts, and a
+map error only when the renderer stays unreachable for 15 s.
+
+A frozen stream, frames still coming (on the car 15-21 a second) but all the
+same blank picture, is taken down after 10 s (`freeze_ms`, at least
+`freeze_min_fps` 3 a second): the stock map shows (in Off, an empty centre)
+and the app shows `Map frozen — reconnect CarPlay`. The map is back with the
+first changed frame. A stream that has shown no picture yet is frozen only
+after three times as long (30 s), frames still coming: a phone starting its
+stream sends the same blank picture for a couple of seconds and pauses
+before the map's first. A stream starts when CarPlay's cluster stream
+becomes live and ends when it stops being live. Blank: all but one in a thousand of the sampled luma
+values within 17 levels. A static map is never frozen, however many frames
+the phone sends: some phones send one about every ten seconds, others keep
+their full rate.
 
 A render that missed the stream's start decodes nothing until a new stream.
 Where recmgr allows a CarPlay restart, `patchd` restarts CarPlay after 15 s of
@@ -82,6 +115,60 @@ reconnect the phone. If a patched CarPlay crash-loops,
 `waze-on-cluster-recovery.service` restores the original binary on disk
 (PATCH.md "Boot recovery").
 
+**Losses.** The phone sends a keyframe only at the start of its stream, so
+the render decodes through a lost packet:
+
+- The AVB bridge's callback and the UDP reader only copy each packet into a
+  queue of 4096 packets or 6 MB (about 4 s of the stream) and return; one
+  decode thread depacketises and decodes them in order. Past the queue's
+  headroom the oldest packets are dropped, and counted. A slot keeps a
+  buffer of at most 2 KB once its packet is out, so large datagrams leave
+  no memory behind. The receive threads run at nice -5 (the unit file's
+  `LimitNICE`), the decode thread at the service's nice 0. The FIFO reader, a byte stream that holds its
+  writer back, decodes on its own thread.
+- Every frame is decoded, since each builds on the one before, but only the
+  newest gets a picture. While a later frame's first packet (a new RTP
+  timestamp) is already queued, the frames decoded meanwhile skip the
+  picture: no scaling, packing, level rounding or hand-off. A decode slower
+  than the phone's frame rate thus skips pictures instead of falling
+  behind; the wait in the queue stays within about one picture's output
+  and a few frames' decoding. A decoder slower than the stream even
+  without the pictures is logged when every packet has waited over 200 ms
+  for 5 s (`waze: the decoder is behind the stream: …`), and again when a
+  packet waits under 100 ms (`waze: the decoder caught up with the stream
+  after 37 s behind it (packets waited at most 2400 ms)`).
+- A sequence gap drops only the NAL unit it cut (an FU-A); every slice after
+  it goes to the decoder, which conceals what is missing. The frames are
+  shown as decoded: the map can show smudges until the phone codes those
+  areas again, and MSDK's per-frame `Corrupted` flags are counted. A decoder
+  that has never started still waits for the stream's first SPS. Only
+  30 access units in a row that fail to decode give the sequence up; the
+  decoder then waits for a keyframe as at the start, and the resync above
+  applies.
+- A gap followed by an SPS is a new stream (the phone reconnected or
+  CarPlay asked for a new one), logged as `waze: a new stream from avb
+  (sequence 40000, expected 17)`, not a loss. Any other gap is a loss,
+  logged with the jump, its source and whether the receive queue dropped
+  it (`waze: lost 5 packets of the stream from avb (sequence 1240, expected
+  1235); decoding through it`), and so are the first corrupted frame after
+  it and the first clean one begun after it (`waze: the picture is clean
+  again 150 ms after the loss at 12:39:50 (3 corrupted frames)`), at most
+  10 such lines a minute.
+- Decoding through a loss, the map shows and the status has no reason
+  for it; `probe.txt`'s `stream:` line says `lost part of the stream at
+  12:39:50; decoding through it` until that clean frame. The status's
+  `reason`, which the app shows, is `Stream lost — reconnect CarPlay`, or
+  `Stream lost — restarting CarPlay` once `patchd` has decided for this
+  wait that it will restart CarPlay (PATCH.md "Stream resync"), while the
+  stream arrives with nothing decoded for 2 s (a render started
+  mid-stream, or a loss the decoder does not decode through) and while the
+  decoder has given up its sequence. The detail, with when that began and
+  `patchd`'s reason for holding the resync, is in the log (`waze: stream
+  lost: the stream arrives with nothing decoded since 12:40:50; resync
+  held: recmgr did not load a carplay restart entry this boot`) and in
+  `probe.txt`. A status line whose only change is the stream's reason is
+  logged at most once every 10 s.
+
 From a shell, `waze-on-cluster -c <conf> run map|panel|hud` (`sail` is an
 alias of `map`) sets the target until the service restarts and prints the
 status.
@@ -89,14 +176,44 @@ status.
 ## Status and diagnostics
 
 Once a second the render writes, in `/run/waze-on-cluster/` (mode 0644):
-`status.json`, the status the app shows (`state` idle, starting, showing or
-error; `page`; `reason`; the shared upload cap as `upload_cap_kb_per_s` and
+`status.json`, the status the app shows (`state` idle, starting, showing,
+frozen or error; `page`; `reason`; the shared upload cap as `upload_cap_kb_per_s` and
 why as `upload_reason`, also in the app's status event); `probe.txt`, the
-sources, the depacketiser (`rtp: packets nals aus seq_gaps dropped bad`), the
-decoder, the late-join verdict, the noise filter's tile differences and the
-renderer's own status; and `stream.json`, for `patchd`'s resync. `patchd`
-answers `{"cmd":"logs"}` with CarPlay, AVB and DLT marker lines and its own
-log.
+sources, the depacketiser (`rtp: packets nals aus seq_gaps lost dropped bad`),
+the receive queue (`queue: N dropped, at most M of 4096 packets waiting, K KB
+held`), its backlog (`backlog: the oldest packet waiting N ms, the longest
+wait M ms; K frames decoded without a picture to catch up`, with `; the
+decoder is behind the stream` while it is), the stream (`stream: whole` or
+the detail above), the decoder, the late-join verdict, the noise filter's
+tile differences and the renderer's own status; and `stream.json`, for
+`patchd`'s resync. `patchd` answers `{"cmd":"logs"}` with CarPlay, AVB and
+DLT marker lines and its own log.
+
+Every line the render logs also goes to
+`/var/opt/waze-on-cluster/log/waze-on-cluster.log` (`log_file`) with its UTC
+time, so it outlives the journal's few minutes on the unit, restarts and
+reboots; past `log_file_kb` (512) the file becomes `waze-on-cluster.log.1`.
+The service makes the directory, owned by `hmi_5000`, at each start; the
+deploy tool removes it with the rest of `/var/opt/waze-on-cluster`. The log
+has the status when its state, reason or target changes, each loss and a
+decoder behind the stream (above), and once a minute while frames come, how
+many were decoded, how many of those without a picture, changed and flagged
+corrupted, whether the last picture was blank, the losses and the packets
+they cost, the packets the receive queue dropped, and how long the decoded
+packets waited in it:
+`waze: 1840 frames decoded in the last minute, 12 without a picture to
+catch up, 1 changed, 0 corrupted; the last picture is not blank; 0 losses
+(0 packets), 0 dropped by the receive queue; packets waited 2.4 ms on
+average, 61 ms at most`.
+
+For a report, run as root on the unit
+`sh /var/opt/waze-on-cluster/current/collect-logs.sh`: it writes
+`/tmp/woc-logs-<UTC date and time>.tar.gz` and prints its path. The archive
+holds both tools' log files (cluster-render's too), the files in
+`/run/cluster-render/` and the three above, this boot's journal of the
+render, `patchd`, the recovery service, cluster-render and carplay, the list
+of boots, `ls -l` of both tools' folders, their `*.local.conf`, the date and
+the uptime.
 
 Sockets: `/dev/shm/waze-on-cluster/ctl.sock` (the render's status and log,
 group `tm_oap_app`; a connection also starts the service) and
@@ -133,17 +250,20 @@ quarter second later, brings the exact picture back. `waze-on-cluster
 bench-pack <I420 file>` times the packing on the unit.
 
 **Rate.** `target_fps` (30) is a ceiling on an exact grid; only the newest
-frame waits, so the map skips ahead and never shows a backlog. Real Waze sent
-up to about 16 frames a second on the car.
+frame waits, so the map skips ahead and never shows a backlog, and the
+decoder skips the pictures of frames it is behind on ("Losses"). Real Waze
+sent up to about 16 frames a second on the car.
 
 **Upload budget.** The budget belongs to cluster-render and is shared by all
-its clients: a 6000 KB/s ceiling, stepping down by 500 KB/s to 2000 KB/s on
+its clients: a 5500 KB/s ceiling, stepping down by 500 KB/s to 2000 KB/s on
 sustained congestion and recovering slowly. Set it with `upload_kb_per_s` in
 `/var/opt/cluster-render/cluster-render.local.conf`. This tool's own
 `upload_kb_per_s` and `upload_burst_ms` keys are accepted and ignored with a
 warning naming that file. On the car 8000 KB/s made the cluster flash black;
-6000 KB/s stayed smooth with packed motion and no failed writes, and real
-Waze transitions peaked at about 3.2 MB/s. Every head-unit participant shares
+6000 KB/s stayed smooth with packed motion and no failed writes, but the
+cluster once removed a shown map after a minute averaging 5774 KB/s, so the
+ceiling sits below that. Real Waze
+transitions peaked at about 3.2 MB/s. Every head-unit participant shares
 the link to the cluster, so an upload that outruns it can drop other contents
 too. Details: the cluster-render README.
 
@@ -152,11 +272,17 @@ Settings are in `waze-on-cluster.conf` (documented inline). Overrides go in
 
 ## The patch
 
-`patch/carplay_patch.js` (Node 8, no dependencies) makes four edits, each
-validated against the one known build (whole-file SHA-256, plus anchor bytes
-around each region), after a verified full backup:
+`patch/carplay_patch.js` (Node 8, no dependencies) makes four edits after a
+verified full backup. `patch/carplay_locate.js` finds each edit's site in the
+build by its code and data and checks it before any write, so the patch
+applies to any carplay build in which every site is found exactly once; a
+build where one is not is left alone, with the reason. `carplay_patch.js
+probe` (`woc-patch.sh probe`) shows where the sites are in a binary and
+whether it is patchable, without writing. The build the patch was proven on,
+carplay 22.28.3, also has to match its shipped SHA-256 before the first edit.
+Its sites:
 
-| Edit | What it does | Where |
+| Edit | What it does | Where (carplay 22.28.3) |
 |---|---|---|
 | variant | jump-table slot for `KI_KOMBI_VARIANT` 7 → IC_HIGH or IC_MID | 4 B at `0x2ba4f0` |
 | sink | second-stream sink URL: stock `avb://`, or `udp://…`, `file://…` | ≤ 59 B at `0x2a20b0` |
@@ -164,10 +290,10 @@ around each region), after a verified full backup:
 | resolution | IC_HIGH geometry → 1088x480 px at 138x61 mm, safe area 504x368+286+72 | four 8 B immediates at `0x20ca32`–`0x20ca7c` |
 
 `patchd` and the install hook apply `--panel high` with the stock sink.
-`woc-patch.sh` is the shell path, for experiments: `status`, `verify`,
-`revert [--force]`, and `apply high|mid` with `--avb` (the app's sink), no
-flag (`udp://127.0.0.1:20557`), `--capture` (FIFO) or `--sink <url>`, plus
-`--res WxH|stock` and `--safe WxH+X+Y|full`. It remounts `/` read-write only
+`woc-patch.sh` is the shell path, for experiments: `status`, `probe`,
+`verify`, `revert [--force]`, and `apply high|mid` with `--avb` (the app's
+sink), no flag (`udp://127.0.0.1:20557`), `--capture` (FIFO) or `--sink
+<url>`, plus `--res WxH|stock` and `--safe WxH+X+Y|full`. It remounts `/` read-write only
 for the write. **Never `systemctl stop` or `restart` carplay**: that
 power-cycles the head unit, and so does any CarPlay death unless recmgr
 loaded `carplay` in both restart lists at this boot. `revert` refuses a
@@ -176,9 +302,12 @@ binary it does not recognise as a patched form of the backup
 
 ## Safety
 
-- The patch is the only change to a BMW binary. It is reversible, SHA-pinned
-  and fully backed up, refuses an unknown or otherwise-modified build, is
-  written by atomic rename, and takes effect at the next CarPlay start.
+- The patch is the only change to a BMW binary. It is reversible and fully
+  backed up, checks every edit site before writing, refuses a build where a
+  site is not found or not recognised, is written by atomic rename, and
+  takes effect at the next CarPlay start. Its first apply to a proven build
+  (PATCH.md) also requires the whole file to be the shipped one; on any
+  other build, and once its backup exists, only the four sites are checked.
   Removal reverts our edits only.
 - `patchd` runs as root. It accepts only `apply` (panel `high|mid`, mode
   `avb|udp|fifo`), `revert`, `reboot`, `status`, `logs` and the capture
@@ -222,7 +351,9 @@ in slot `0x100` under the gauges with normal colours, readable text and
 correct transitions. A 10-packet slice of a car capture is the depacketiser's
 golden test (`test/data/stream15_start.rtp`).
 
-Open: that the phone's SPS is exactly the advertised 1088x480; how packed
+Open: how the unit's hardware MSDK conceals a lost slice or picture, and
+whether it flags those frames `Corrupted` (and propagates the flag to the
+frames that reference them); that the phone's SPS is exactly the advertised 1088x480; how packed
 motion reads during a long fast pan while driving; whether the alternate
 display survives iOS and Waze updates (flag 1006 is server-side). Waze sends
 no guidance metadata, so this shows map pixels, not data-driven directions.
@@ -246,8 +377,8 @@ link-only stubs of the unit's libmfx, libva, libva-drm and IAS AVB bridge
 The patch tests run against a copy of the unit's `/usr/bin/carplay`
 (carplay 22.28.3, sha256
 `ddb33e33161387c6479c391684b3d019b0de54ecfcee8d6877eca94aa62f3e50`) named by
-`CARPLAY_BIN`; without it they are skipped (`SKIP`). The repository carries
-no BMW binary. `test-firmware` runs the unit's own dlt-daemon, libdlt and
+`CARPLAY_BIN`; without it they are skipped (`SKIP`). The locator's test runs
+on synthetic builds without it. The repository carries no BMW binary. `test-firmware` runs the unit's own dlt-daemon, libdlt and
 dlt-receive from `ROOTFS`, an extracted root file system of the unit.
 
 ## License

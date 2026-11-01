@@ -35,6 +35,7 @@
 #include <unistd.h>
 #include <vector>
 
+#include "alt_screen.h"
 #include "config.h"
 #include "control.h"
 #include "log.h"
@@ -50,6 +51,11 @@ using crk::atlas_height;
 using crk::block_bytes;
 using crk::pack_blocks;
 using crk::texture_size_error;
+
+/* component.json's version, given by the target build. */
+#ifndef WOC_VERSION
+#define WOC_VERSION ""
+#endif
 
 namespace {
 
@@ -121,6 +127,36 @@ private:
     std::string last_;
 };
 
+/* Whether patchd would restart CarPlay for a new stream (PATCH.md "Stream
+ * resync"), from the resync record it keeps next to its socket, root's and
+ * world-readable: "waiting" true once it decided for the current wait, and
+ * "held", null or why it would not. Unread without the record or its
+ * "held". */
+ResyncState read_resync(const std::string &path)
+{
+    ResyncState r;
+    char buf[1024];
+    const int fd = open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0)
+        return r;
+    const ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0)
+        return r;
+    buf[n] = 0;
+    const char key[] = "\"held\":";
+    const char *p = std::strstr(buf, key);
+    if (!p)
+        return r;
+    p += sizeof key - 1;
+    const char *end = *p == '"' ? std::strchr(p + 1, '"') : nullptr;
+    r.read = end || std::strncmp(p, "null", 4) == 0;
+    if (end)
+        r.held.assign(p + 1, end);
+    r.waiting = std::strstr(buf, "\"waiting\":true") != nullptr;
+    return r;
+}
+
 /* Files next to the FIFO, in the render's own RuntimeDirectory, which it can
  * write: status.json, probe.txt and stream.json, for the remote diagnostics
  * and patchd, read without taking the control socket's owner slot. 0644,
@@ -146,6 +182,8 @@ void write_sibling_file(const std::string &fifo_path, const char *name, const st
 
 int serve(const Config &cfg)
 {
+    if (cfg.has("log_file"))
+        log_to_file(cfg.str("log_file"), log_file_cap(cfg.num("log_file_kb")), "waze-on-cluster", WOC_VERSION);
     VideoConfig vc;
     vc.fifo_path = cfg.str("fifo_path");
     vc.carplay_group = cfg.str("carplay_group");
@@ -166,7 +204,10 @@ int serve(const Config &cfg)
                      "(upload_kb_per_s in /var/opt/cluster-render/cluster-render.local.conf)", key, cfg.str(key).c_str());
     struct Range { const char *key; long lo, hi; } ranges[] = {
         {"dirty_threshold", 0, 64}, {"dirty_settle_ms", 0, 3600000}, {"tex_level_bits", 0, 3},
-        {"target_fps", 0, 60},      {"pan_blocks", 0, 1},            {"stall_ms", 1000, 600000}};
+        {"target_fps", 0, 60},      {"pan_blocks", 0, 1},            {"stall_ms", 1000, 600000},
+        {"freeze_ms", 0, 600000},   {"freeze_min_fps", 1, 60},       {"alt_screen_port", 0, 65535},
+        {"idle_ms", 1000, 600000},
+        {"alt_screen_uid", 0, 4294967294L}};
     for (const Range &r : ranges)
         if (cfg.num(r.key) < r.lo || cfg.num(r.key) > r.hi) {
             log_error("%s must be from %ld to %ld", r.key, r.lo, r.hi);
@@ -174,6 +215,8 @@ int serve(const Config &cfg)
         }
     vc.tex_level_bits = (uint32_t)cfg.num("tex_level_bits");
     vc.stall_ms = (int)cfg.num("stall_ms");
+    vc.freeze.ms = (unsigned)cfg.num("freeze_ms");
+    vc.freeze.min_fps = (unsigned)cfg.num("freeze_min_fps");
 
     FeedConfig fc;
     fc.socket = cfg.str("render_socket");
@@ -185,7 +228,9 @@ int serve(const Config &cfg)
     fc.video.dirty_threshold = (unsigned)cfg.num("dirty_threshold");
     fc.video.settle_ms = (unsigned)cfg.num("dirty_settle_ms");
     fc.video.pan_blocks = cfg.num("pan_blocks") == 1 && vc.tex_height % 4 == 0;
-    fc.video.stall_ms = (unsigned)vc.stall_ms;
+    /* The layer's visibility follows the stream (set_stream); the renderer's
+     * stall takes it down if the stream's connection outlives its frames. */
+    fc.video.stall_ms = (unsigned)cfg.num("idle_ms");
 
     sigset_t sigs;
     sigemptyset(&sigs);
@@ -208,7 +253,18 @@ int serve(const Config &cfg)
     }
 
     std::vector<uint8_t> frame;
+    StatusLog status_log;
     int64_t last_status_write = 0;
+    uint32_t errs_logged = 0;
+    int64_t errs_logged_ms = -60000;
+    const AltScreen alt((uint16_t)cfg.num("alt_screen_port"), (uint32_t)cfg.num("alt_screen_uid"));
+    StreamLiveness liveness(vc.stall_ms);
+    const std::string socket_path = cfg.str("socket_path");
+    const std::string resync_file = socket_path.substr(0, socket_path.find_last_of('/') + 1) + "resync.json";
+    ResyncState resync;
+    std::string last_detail;
+    AltScreen::State alt_state = AltScreen::Unknown;
+    int64_t alt_read_ms = 0;
     for (;;) {
         struct pollfd p[5] = {{sig_fd, POLLIN, 0}, {control.listen_fd(), POLLIN, 0}, {control.owner_fd(), POLLIN, 0},
                               {feed.fd(), (short)(POLLIN | (feed.wants_write() ? POLLOUT : 0)), 0},
@@ -230,18 +286,59 @@ int serve(const Config &cfg)
         uint64_t id = 0;
         if (producer.take(&frame, &id))
             feed.offer(&frame, id, now);
+        if (now - alt_read_ms >= 1000) {
+            const AltScreen::State s = cfg.num("alt_screen_port") ? alt.read() : AltScreen::Unknown;
+            if (s != alt_state)
+                log_info("CarPlay's alternate-screen connection: %s",
+                         s == AltScreen::Connected ? "connected" : s == AltScreen::Absent ? "absent" : "not readable");
+            alt_state = s;
+            alt_read_ms = now;
+        }
+        const bool live = liveness.live(alt_state, producer.last_frame_ms(), now);
+        producer.set_live(live);
+        feed.set_stream(live, producer.frozen(now));
         feed.poll(now);
         producer.retry_sources(now);
-        const std::string status = status_line(feed.status(producer.decode_status()));
-        if (feed.take_changed())
+        const FeedStatus fs = feed.status(producer.decode_status(), producer.stream_reason(resync));
+        const std::string status = status_line(fs);
+        /* The frame rate changes the status every second; the log keeps
+         * to its state, reason and target, so the app's last lines are not
+         * all status. */
+        if (status_log.due(fs, now))
             log_info("status %s", status.c_str());
         server.report(status);
         if (now - last_status_write > 1000) {
+            FrameTally::Minute m;
+            StreamHealth::Minute sm;
+            Backlog::Minute bm;
+            uint64_t overflows = 0;
+            if (producer.minute(now, &m, &sm, &bm, &overflows))
+                log_info("waze: %u frames decoded in the last minute, %u without a picture to catch up, %u changed, "
+                         "%u corrupted; the last picture is %s; %u losses (%u packets), %llu dropped by the receive "
+                         "queue; packets waited %.1f ms on average, %lld ms at most",
+                         m.frames + bm.skipped, bm.skipped, m.changed, sm.corrupted, m.blank ? "blank" : "not blank",
+                         sm.losses, sm.lost, (unsigned long long)overflows, bm.wait_us.mean() / 1000.0,
+                         (long long)(bm.wait_us.max / 1000));
+            producer.track_keyframe_wait(now);
+            resync = read_resync(resync_file);
+            const std::string detail = producer.stream_detail(resync);
+            if (producer.stream_lost() && detail != last_detail)
+                log_warn("waze: stream lost: %s", detail.c_str());
+            last_detail = detail;
+            /* New decode errors, at most once a minute. */
+            std::string last_err;
+            const uint32_t errs = producer.decode_errors(&last_err);
+            if (errs != errs_logged && now - errs_logged_ms >= 60000) {
+                log_warn("waze: %u decode errors so far, the last: %s", errs, last_err.c_str());
+                errs_logged = errs;
+                errs_logged_ms = now;
+            }
             write_sibling_file(cfg.str("fifo_path"), "status.json", status);
             /* The framing probe and the renderer's own status (targets, the
              * map layer's writes, the upload cap), for the diagnostics. */
-            producer.track_keyframe_wait(now);
-            write_sibling_file(cfg.str("fifo_path"), "probe.txt", producer.probe_report() + feed.report());
+            write_sibling_file(cfg.str("fifo_path"), "probe.txt",
+                               producer.probe_report() + "stream: " + (detail.empty() ? "whole" : detail) + "\n" +
+                                   feed.report());
             feed.request_report();
             /* For patchd's stream resync (PATCH.md "Stream resync"). */
             write_sibling_file(cfg.str("fifo_path"), "stream.json",
@@ -359,17 +456,25 @@ void define_keys(Config *cfg)
     cfg->define("dirty_threshold", "8");
     cfg->define("dirty_settle_ms", "1000");
     cfg->define("stall_ms", "6000");
+    cfg->define("idle_ms", "60000");
+    cfg->define("freeze_ms", "10000");
+    cfg->define("freeze_min_fps", "3");
+    cfg->define("alt_screen_port", "6031");
+    cfg->define("alt_screen_uid", "13002");
     cfg->define("target_fps", "30");
     cfg->define("pan_blocks", "1");
     cfg->define("tex_level_bits", "2");
     cfg->define("target", "map");
     cfg->define("render_socket", "/dev/shm/cluster-render/render.sock");
+    cfg->define("log_file", "/var/opt/waze-on-cluster/log/waze-on-cluster.log");
+    cfg->define("log_file_kb", "512");
     for (const char *key : kIgnoredKeys)
         cfg->define(key, "");
 }
 
 int main(int argc, char **argv)
 {
+    cld::log_name = "waze-on-cluster";
     Config cfg;
     define_keys(&cfg);
     std::string err;

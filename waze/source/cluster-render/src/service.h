@@ -8,9 +8,10 @@
  *   2. clients' messages and frames are taken (server),
  *   3. each target's layers are arranged and its demand is set (compositor),
  *   4. targets are published, requested, kept or released (slot manager),
- *   5. each published target's layers are staged and flushed once,
+ *   5. each requested target's layers are staged and flushed once,
  *   6. changed states go to the clients, and once a second to the status
- *      file. */
+ *      file; once a minute each shown target's layers' writes since its
+ *      last such line, and whether it is rendered, go to the log. */
 #ifndef CRS_SERVICE_H
 #define CRS_SERVICE_H
 
@@ -29,10 +30,11 @@ namespace crs {
 
 struct ServiceConfig {
     std::vector<TargetSpec> targets;
-    GovernorConfig budget;   /* ceiling 6000, floor 2000, step 500 KB/s */
+    GovernorConfig budget;   /* ceiling 5500, floor 2000, step 500 KB/s */
     int upload_burst_ms = 250;
     int slow_flush_ms = 150;
     int fps = 30;                /* the loop's tick while a target is up */
+    int fade_ms = 250;           /* a target's layers fade in when it is shown, and out before it is released */
     std::string socket_path = "/dev/shm/cluster-render/render.sock";
     unsigned socket_mode = 0660;
     std::string socket_group;
@@ -54,7 +56,8 @@ public:
     int timeout_ms(int64_t now_ms) const;
     /* Steps 2-6 (README.md "The render loop"). */
     void after_poll(const std::vector<pollfd> &fds, size_t first, int64_t now_ms);
-    /* Takes everything off the display, for a clean exit. */
+    /* Takes everything off the display and unpublishes the scenes, for a
+     * clean exit. */
     void shutdown(int64_t now_ms);
 
 private:
@@ -63,6 +66,12 @@ private:
     std::unique_ptr<Compositor> comp_;
     std::unique_ptr<Server> server_;
     int64_t status_ms_ = 0;
+    static const int64_t kMinuteMs = 60000;
+    int64_t minute_ms_ = 0;
+    /* Per target: its layers' writes and the time at its last minute line. */
+    std::vector<WriteStats> stats_;
+    std::vector<int64_t> stats_ms_;
+    void log_minute(int64_t now_ms);
 };
 
 }  // namespace crs

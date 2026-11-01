@@ -49,8 +49,9 @@
  *                    pending: apply | revert, while a written change waits for
  *                    the next head-unit start (carplay is then deferred)
  *                    conflict: why the patch is not applied when the tool is
- *                    installed (an unrecognised binary, one something else
- *                    modified, a carplay.service that starts another program)
+ *                    installed (a binary the patcher cannot patch, one
+ *                    something else modified, a carplay.service that starts
+ *                    another program)
  *                  {"ev":"log","line":...}   the backlog on connect, then each new line
  *
  * Install-time activation (the deploy tool's activate and deactivate hooks,
@@ -295,11 +296,11 @@ function readState(cb) {
         else if (/variant:\s+ORIGINAL/.test(text) && sinkOriginal) state = 'original';
         else state = 'unknown';
         /* What keeps the tool from writing the patch by itself: a binary the
-         * patcher does not know, one something else modified (no backup of
-         * ours, not the pristine build), or another program started as
-         * carplay. */
+         * patcher cannot patch (an edit site not found, or one it does not
+         * recognise), one something else modified (no backup of ours, not the
+         * pristine build), or another program started as carplay. */
         var conflict = err && !text ? 'carplay status unreadable: ' + err.message
-            : !known ? 'carplay is not the build this patch knows' + (unknownWhy ? ' (' + unknownWhy[1] + ')' : '')
+            : !known ? 'not patchable' + (unknownWhy ? ': ' + unknownWhy[1] : '')
             : !hasBackup && !pristine ? 'carplay was modified by something else'
             : foreignStart();
         /* A change waiting for the next head-unit start: the running carplay is
@@ -452,8 +453,9 @@ function waitCarplayActive(tries, cb) {
 }
 
 /* Stream resync. The phone sends SPS, PPS and an IDR only when a stream
- * starts, so a render that joined after the start (it restarted, or lost RTP
- * sync) decodes nothing until the next stream (PATCH.md "Stream resync"). The
+ * starts, so a render that joined after the start (it restarted), or whose
+ * decoder gave up its sequence, decodes nothing until the next stream
+ * (PATCH.md "Stream resync"). The
  * render reports, each second, how long the stream has arrived with no
  * keyframe and nothing decoded (STREAM_STATE); past RESYNC_AFTER_MS patchd
  * restarts carplay as it activates a patch (restartCarplay), and the phone
@@ -463,8 +465,12 @@ function waitCarplayActive(tries, cb) {
  * RESYNC_MAX a head-unit start. The counts sit next to the socket, so a
  * patchd restart keeps them and a head-unit start clears them;
  * RESYNC_RESET_MS without a wait sets the spacing back to its first step.
- * The report is in the render's own directory, so it is read as a small
- * regular file, never through a link and never blocking. */
+ * The record also says whether patchd has decided for the current wait
+ * ("waiting") and why a resync would wait ("held", null when it would go),
+ * which the render shows; both are cleared when the wait ends, and patchd
+ * rewrites the record at start, so it never carries a previous process's
+ * decision. The report is in the render's own directory, so it is read as a
+ * small regular file, never through a link and never blocking. */
 var STREAM_STATE = process.env.WOC_STREAM_STATE || path.join(path.dirname(FIFO), 'stream.json');
 var STREAM_STALE_MS = 5000;   /* older: the render is not reporting */
 var RESYNC_FILE = process.env.WOC_RESYNC_FILE || path.join(path.dirname(SOCK), 'resync.json');
@@ -478,10 +484,16 @@ try {
     var saved = JSON.parse(fs.readFileSync(RESYNC_FILE, 'utf8'));
     if (saved.total > 0) resync = { attempts: saved.attempts || 0, last: typeof saved.last === 'number' ? saved.last : null, total: saved.total };
 } catch (e) {}
-var calmSince = null, resyncHeld = null, resyncing = false;
+var calmSince = null, resyncWaiting = false, resyncHeld = null, resyncing = false;
 
 function saveResync() {
-    try { fs.writeFileSync(RESYNC_FILE, JSON.stringify(resync) + '\n'); } catch (e) { log('resync state: ' + e.message); }
+    var record = Object.assign({ waiting: resyncWaiting, held: resyncHeld }, resync);
+    /* Written whole and renamed into place: the render reads it any time. */
+    var tmp = RESYNC_FILE + '.tmp';
+    try {
+        fs.writeFileSync(tmp, JSON.stringify(record) + '\n');
+        fs.renameSync(tmp, RESYNC_FILE);
+    } catch (e) { log('resync state: ' + e.message); }
 }
 
 function streamWait() {
@@ -500,10 +512,28 @@ function streamWait() {
     }
 }
 
-/* Logs why a due resync waits, once per reason. */
-function holdResync(reason) {
-    if (resyncHeld !== reason) log('resync held: ' + reason);
+/* Records whether there is a wait patchd has decided for, and why a
+ * resync would wait (null: it would go, or no wait); logs each new reason. */
+function decideResync(waiting, reason) {
+    if (resyncWaiting === waiting && resyncHeld === reason) return;
+    if (reason && reason !== resyncHeld) log('resync held: ' + reason);
+    resyncWaiting = waiting;
     resyncHeld = reason;
+    saveResync();
+}
+
+/* Why a due resync would wait; null: it would go. */
+function resyncHold(now) {
+    if (busy || quitting || rebooting) return 'another operation is running';
+    if (resync.total >= RESYNC_MAX) return RESYNC_MAX + ' attempts this head-unit start';
+    if (resync.attempts > 0) {
+        if (now < resync.last) resync.last = now;   /* the clock went back: a full spacing from now */
+        var spacing = RESYNC_SPACING_MS[Math.min(resync.attempts, RESYNC_SPACING_MS.length) - 1];
+        if (now - resync.last < spacing)
+            return 'attempt ' + (resync.attempts + 1) + ' waits ' + Math.round(spacing / 1000) + ' s after the last';
+    }
+    if (!recmgrLoaded('carplay')) return 'recmgr did not load a carplay restart entry this boot';
+    return null;
 }
 
 function checkResync() {
@@ -511,7 +541,7 @@ function checkResync() {
     var now = Date.now(), wait = streamWait();
     if (wait === null) return;
     if (wait === 0) {
-        resyncHeld = null;
+        decideResync(false, null);
         if (calmSince === null) calmSince = now;
         if (resync.attempts > 0 && now - calmSince >= RESYNC_RESET_MS) {
             resync.attempts = 0;
@@ -521,16 +551,10 @@ function checkResync() {
         return;
     }
     calmSince = null;
-    if (wait < RESYNC_AFTER_MS) return;
-    if (busy || quitting || rebooting) { holdResync('another operation is running'); return; }
-    if (resync.total >= RESYNC_MAX) { holdResync(RESYNC_MAX + ' attempts this head-unit start'); return; }
-    if (resync.attempts > 0) {
-        if (now < resync.last) resync.last = now;   /* the clock went back: a full spacing from now */
-        var spacing = RESYNC_SPACING_MS[Math.min(resync.attempts, RESYNC_SPACING_MS.length) - 1];
-        if (now - resync.last < spacing) { holdResync('attempt ' + (resync.attempts + 1) + ' waits ' + Math.round(spacing / 1000) + ' s after the last'); return; }
-    }
-    if (!recmgrLoaded('carplay')) { holdResync('recmgr did not load a carplay restart entry this boot'); return; }
-    resyncHeld = null;
+    /* Decided from the wait's start, so the render can say at once whether
+     * CarPlay will be restarted. */
+    decideResync(true, resyncHold(now));
+    if (resyncHeld || wait < RESYNC_AFTER_MS) return;
     resync = { attempts: resync.attempts + 1, last: now, total: resync.total + 1 };
     saveResync();
     /* Not busy: the patch state the app shows is unchanged; apply, revert
@@ -1139,6 +1163,7 @@ function main() {
         setInterval(function () {
             captureCommand('status', function (state) { send({ ev: 'capture', capture: state }); });
         }, 1000);
+        saveResync();   /* no hold reason from a previous process */
         setInterval(checkResync, RESYNC_POLL_MS);
     }); });
     server.on('error', function (e) { process.stderr.write('patchd: ' + e.message + '\n'); process.exit(1); });

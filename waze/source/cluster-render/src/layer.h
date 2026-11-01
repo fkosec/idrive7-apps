@@ -8,7 +8,7 @@
  * A layer outlives its target's scene: it keeps what it shows on the CPU,
  * so when the scene is published again (attach) it is drawn as it was, its
  * animations started again. Each render tick the compositor asks every
- * layer of a published target to stage its changes into the scene, flushes
+ * layer of a requested target to stage its changes into the scene, flushes
  * the scene once if any did, and tells each layer whether that flush went
  * (committed). A layer that staged nothing is not asked. A layer whose
  * failed write left its buffer half written either holds the target until
@@ -46,6 +46,13 @@ struct LayerParams {
 };
 
 enum class Stage { Idle, Wrote, Failed };
+
+/* What a layer's stage() wrote since the layer was made: frames (a video's)
+ * or images written, their bytes, writes or flushes that failed, and stages
+ * held back by the byte budget. */
+struct WriteStats {
+    uint64_t frames = 0, bytes = 0, failed = 0, holds = 0;
+};
 
 /* The uniforms a client sets on one quad or part, kept so a new scene gets
  * them, each sent in the next flush after it changes. */
@@ -123,6 +130,18 @@ public:
     virtual void arrange(bool drawn, int32_t order) = 0;
     /* params.rect or params.opacity changed. */
     virtual void place() = 0;
+    /* The layer draws its own opacity (video and image): params.opacity
+     * times its target's fade. */
+    virtual bool fades() const { return false; }
+    /* Its target's fade, 0-1 (the compositor's); the next flush carries it. */
+    void set_fade(float f)
+    {
+        if (f != fade_) {
+            fade_ = f;
+            faded();
+        }
+    }
+    float fade() const { return fade_; }
     /* Writes what changed into the scene; the caller flushes. */
     virtual Stage stage(int64_t now_ms) = 0;
     /* After stage() returned Wrote or Failed: whether the flush carrying it
@@ -141,8 +160,13 @@ public:
     virtual int64_t wake_in_ms(int64_t) const { return -1; }
     /* A line for the status: what it wrote. */
     virtual std::string stats() const { return ""; }
+    virtual WriteStats write_stats() const { return WriteStats(); }
+    /* Pixel bytes its buffers hold in the scene; 0 when not attached. */
+    virtual size_t buffer_bytes() const { return 0; }
 
 protected:
+    /* After set_fade() changed the fade. */
+    virtual void faded() {}
     /* What an animation of part acts on in the scene; 0: none. */
     virtual int animated(uint32_t) const { return 0; }
     /* Why this layer cannot play a on part; nullptr: it can. */
@@ -165,6 +189,7 @@ protected:
     Graph *g_ = nullptr;
     bool drawn_ = false;
     int32_t order_ = 0;
+    float fade_ = 1.0f;
 
     /* Keeps a and starts it when attached; no limit (the service's own). */
     bool play(uint32_t anim, uint32_t part, const Animation &a, std::string *err);
@@ -210,8 +235,12 @@ public:
     bool holds_flush() const override { return holding() && drawn_; }
     int64_t wake_in_ms(int64_t now_ms) const override;
     std::string stats() const override;
+    WriteStats write_stats() const override;
+    size_t buffer_bytes() const override { return g_ ? (size_t)w_ * h_ * 4 : 0; }
+    bool fades() const override { return true; }
 
 protected:
+    void faded() override;
     int animated(uint32_t part) const override { return part ? 0 : quad_; }
     const char *animation_error(uint32_t part, const Animation &a) const override
     {
@@ -234,7 +263,7 @@ private:
     int buf_ = 0, quad_ = 0;
     std::vector<uint8_t> scratch_;
     size_t staged_ = 0;   /* bytes setData took this tick */
-    uint64_t writes_ = 0, bytes_ = 0, failed_ = 0;
+    uint64_t writes_ = 0, bytes_ = 0, failed_ = 0, held_budget_ = 0;
 };
 
 /* A fragment shader over params.rect (GLSL ES 1.00, varying v_uv from the

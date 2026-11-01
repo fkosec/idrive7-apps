@@ -21,8 +21,13 @@
  *   exclusive layer suspends the ones below and gives them back in one
  *   flush, clients coming and going cause no display traffic, and the
  *   target is released only after the last layer has gone and the linger;
+ * - warm scenes: a target released or taken by the display keeps its
+ *   scene, writes and flushes nothing while released, and asked for again
+ *   flushes in the same tick, a video writing only the tiles that changed
+ *   since the scene's last flush; the renderer's resend of the whole scene
+ *   is charged to the byte budget, a new scene's not;
  * - layers keep their content across their target's scene going and
- *   coming back;
+ *   coming back (another target with the same scene id taking it);
  * - effects compile or are refused at creation; uniforms and u_time;
  * - the limits;
  * - assets: written before the layers sampling them are drawn, charged to
@@ -33,7 +38,12 @@
  * - mesh layers: parts with their depth, culling and blending, ready with
  *   their first geometry, geometry replaced at most once a second and
  *   paced; views and quads drawn in passes that follow the stack;
- * - animations on quads, parts and cameras, and the renderer's u_time. */
+ * - animations on quads, parts and cameras, and the renderer's u_time;
+ * - fades: video and image layers drawn at 0 until their target is shown,
+ *   then brought to their own opacity over fade_ms in a few flushes; when
+ *   nothing wants the target they stay drawn while they fade out, and it is
+ *   released after the fade and the linger; a slot the display takes goes
+ *   at once; a parked target stages nothing. */
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -59,6 +69,7 @@ struct CountingPort : Port {
     bool available() const override { return true; }
     void request(const TargetSpec &) override { requests++; }
     void release(const TargetSpec &) override { releases++; }
+    void take_over(const TargetSpec &, uint64_t) override {}
     void refresh_slots() override {}
 };
 
@@ -87,7 +98,7 @@ struct Rig {
     SlotManager slots{&port, nullptr};
     Compositor *comp = nullptr;
     int64_t now = 50000;
-    int map = 0, panel = 1;
+    int map = 0, panel = 1, hud = 2;
 
     explicit Rig(uint64_t budget = 0, CompositorLimits lim = CompositorLimits())
     {
@@ -95,8 +106,11 @@ struct Rig {
         m.name = "map"; m.slot = 0x100; m.scene_id = 0x010004f0; m.width = W; m.height = H; m.linger_ms = 2000;
         TargetSpec p;
         p.name = "panel"; p.slot = 0x203; p.scene_id = 0x01000400; p.width = 1920; p.height = 720; p.linger_ms = 2000;
+        TargetSpec h;
+        h.name = "hud"; h.slot = 0x323; h.scene_id = 0x01000400; h.width = 800; h.height = 480; h.linger_ms = 2000;
         slots.add(m);
         slots.add(p);
+        slots.add(h);
         GovernorConfig gc;
         gc.max_bps = budget;
         gc.floor_bps = budget / 3;
@@ -122,7 +136,25 @@ struct Rig {
     FakeGraph *g(const char *t) { return gpu.graph(t); }
 };
 
-static LayerParams params(Klass k, Rect r, bool contend = false)
+static LayerParams params(Klass k, Rect r, bool contend = false);
+static Rect R(int x, int y, uint32_t w, uint32_t h);
+
+/* While the panel waits after a loss, the HUD (the panel's scene id) wants
+ * its target, is shown, and its client goes: the panel's scene is
+ * unpublished for the HUD's, which is released after its linger. */
+static void hud_borrows_scene(Rig &r)
+{
+    std::string err;
+    const uint32_t h = r.comp->add_image(9, r.hud, params(Klass::Content, R(0, 0, 8, 8)), 8, 8, 30,
+                                         Sampling::Nearest, r.now, &err);
+    std::vector<uint8_t> px(8 * 8 * 4, 1);
+    static_cast<ImageLayer *>(r.comp->layer(9, h))->update({}, px.data(), px.size(), &err);
+    r.step(10);
+    r.slots.on_shown(0x01000400, r.now);
+    r.comp->remove_owner(9);
+}
+
+static LayerParams params(Klass k, Rect r, bool contend)
 {
     LayerParams p;
     p.klass = k;
@@ -212,14 +244,57 @@ static void video_basics()
        ta.rotate == 90 && tb.rotate == 90 && ta.sx == 0.5f && tb.sx == 0.5f && ta.px == W / 2.0f &&
            ta.py == H / 2.0f && v.atlas->px == rounded(b));
     r.run(8100);
-    ok("frames stopping for stall_ms: stalled, the target lingers, then is released",
-       r.comp->state(id, &why) == LayerState::Stalled && r.port.releases == 1 && !r.g("map"));
+    ok("frames stopping for stall_ms: stalled, the target lingers, then is released, its scene kept",
+       r.comp->state(id, &why) == LayerState::Stalled && r.port.releases == 1 && r.g("map") == g);
     static_cast<VideoLayer *>(r.comp->layer(1, id))->offer(b.data(), r.now);
     r.step(10);
-    g = r.g("map");
-    v = g ? video_view(g) : VideoView();
-    ok("a new frame maps it again, starting whole from that frame",
-       r.port.requests == 2 && g && v.atlas && v.atlas->px == rounded(b));
+    v = video_view(g);
+    ok("a new frame maps it again, in the same scene", r.port.requests == 2 && r.g("map") == g && r.gpu.scenes == 1);
+    r.run(1100);
+    v = video_view(g);
+    ok("and shows that frame once its tiles within the threshold settle", v.atlas && v.atlas->px == rounded(b));
+}
+
+static void warm_scene()
+{
+    Rig r;
+    r.comp->set_fade_ms(250);
+    std::string err;
+    VideoParams vp;
+    const uint32_t id = r.comp->add_video(1, r.map, params(Klass::Content, R(0, 0, W, H), true), vp, r.now, &err);
+    VideoLayer *vl = static_cast<VideoLayer *>(r.comp->layer(1, id));
+    const std::vector<uint8_t> a = frame(1);
+    vl->offer(a.data(), r.now);
+    r.step(10);
+    r.slots.on_shown(0x010004f0, r.now);
+    r.run(50);
+    FakeGraph *g = r.g("map");
+    r.slots.on_lost(0x010004f0, "fetch removed", r.now);
+    r.step(10);
+    ok("taken by the display: released, the scene kept",
+       g && r.port.releases == 1 && r.g("map") == g && r.slots.status(r.map).state == TargetState::Waiting);
+    /* Frames keep coming while it waits after the removal (5 s): two tiles
+     * change. */
+    std::vector<uint8_t> c = a;
+    for (uint32_t y = 0; y < 64; y++)
+        for (uint32_t x = 0; x < 64; x++) {
+            c[(size_t)y * W + x] += 40;
+            c[(size_t)(y + 256) * W + x + 512] += 40;
+        }
+    const uint64_t f0 = g->flushes, b0 = g->flushed_bytes;
+    for (int k = 0; k < 49; k++) {
+        vl->offer(c.data(), r.now);
+        r.run(100);
+    }
+    ok("released: nothing written or flushed while frames come", g->flushes == f0 && g->written == 0 &&
+                                                                     r.port.requests == 1);
+    r.run(150);
+    const VideoView v = video_view(g);
+    const uint64_t bytes = g->flushed_bytes - b0;
+    ok("asked for again: the same scene, flushed at once with the newest frame",
+       r.port.requests == 2 && r.gpu.scenes == 1 && g->flushes > f0 && v.atlas && v.atlas->px == rounded(c));
+    ok("only the tiles that changed since its last flush are written", bytes == 2 * 64 * 64);
+    ok("drawn at 0 until shown", v.atlas_quad && g->shown.quads[v.atlas_quad].uniforms["u_opacity"][0] == 0.0f);
 }
 
 static void packed_motion()
@@ -484,6 +559,49 @@ static void refusals_lower_the_cap()
 static const char *const kFill = "#version 100\nprecision mediump float;\nuniform vec4 u_color;\n"
                                  "void main() { gl_FragColor = u_color; }";
 
+/* Steps until the target's flushes carry more bytes; the ms it took. */
+static int64_t until_written(Rig &r, FakeGraph *g, int64_t limit = 3000)
+{
+    const uint64_t b0 = g->flushed_bytes;
+    const int64_t t0 = r.now;
+    while (g->flushed_bytes == b0 && r.now - t0 < limit)
+        r.step(10);
+    return r.now - t0;
+}
+
+static void warm_scene_charged()
+{
+    const uint64_t rate = 2000 * 1024;   /* a 250 ms burst: 512,000 B */
+    Rig r(rate);
+    std::string err;
+    VideoParams vp;
+    const uint32_t id = r.comp->add_video(1, r.map, params(Klass::Content, R(0, 0, W, H), true), vp, r.now, &err);
+    VideoLayer *vl = static_cast<VideoLayer *>(r.comp->layer(1, id));
+    std::vector<uint8_t> a = frame(1);
+    vl->offer(a.data(), r.now);
+    r.step(10);
+    FakeGraph *g = r.g("map");
+    const size_t atlas = (size_t)W * AH, banks = 2 * crk::block_bytes(W, H);
+    ok("a new scene: its first frame written whole at once", g && g->flushed_bytes == atlas);
+    r.slots.on_shown(0x010004f0, r.now);
+    a[0] += 40;
+    vl->offer(a.data(), r.now);
+    const int64_t fresh = until_written(r, g);
+    /* (783,360 - 512,000) B of debt at 2,048,000 B/s: 133 ms. */
+    ok("its debt is the frame's alone: the next write within 140 ms", fresh >= 120 && fresh <= 140);
+    r.run(2000);
+    r.slots.on_lost(0x010004f0, "fetch removed", r.now);
+    a[W * 300] += 40;
+    vl->offer(a.data(), r.now);
+    while (r.port.requests < 2)
+        r.step(10);
+    /* Asked for again with a full burst: the resend of atlas and banks
+     * (1,305,600 B) leaves 793,600 B of debt, 388 ms. */
+    const int64_t warm = until_written(r, g);
+    ok("a warm scene asked for again: its resend charged, the next write after 380-400 ms",
+       atlas + banks == 1305600 && warm >= 380 && warm <= 400);
+}
+
 static void stack_and_lifecycle()
 {
     Rig r;
@@ -523,11 +641,12 @@ static void stack_and_lifecycle()
     r.run(1990);
     ok("the last layer hidden: still mapped through the linger", r.port.releases == 0 && r.g("panel"));
     r.run(30);
-    ok("then released and its scene taken down", r.port.releases == 1 && !r.g("panel"));
+    FakeGraph *g0 = r.g("panel");
+    ok("then released, its scene kept", r.port.releases == 1 && g0);
     l->params.visible = true;
     r.comp->changed(l);
     r.step(10);
-    ok("shown again: a new scene, requested once", r.port.requests == 2 && r.g("panel"));
+    ok("shown again: the same scene, requested once", r.port.requests == 2 && r.g("panel") == g0);
     ok("a layer of another client cannot be reached", r.comp->layer(2, base) == nullptr);
 }
 
@@ -545,7 +664,8 @@ static void republish_keeps_content()
     r.step(10);
     r.slots.on_lost(0x01000400, "fetch removed", r.now);
     r.step(10);
-    ok("the display took it: scene down", !r.g("panel"));
+    hud_borrows_scene(r);
+    ok("the display took it, and the HUD its scene id: the panel's scene down", !r.g("panel") && r.g("hud"));
     r.run(2100);
     FakeGraph *g = r.g("panel");
     bool same = false;
@@ -784,8 +904,9 @@ static void republish_rebuilds()
     r.run(50);
     r.slots.on_lost(0x01000400, "fetch removed", r.now);
     r.step(10);
-    ok("the display took the panel: scene down", !r.g("panel"));
-    r.run(2100);
+    hud_borrows_scene(r);
+    ok("the display took the panel, and the HUD its scene id: the panel's scene down", !r.g("panel") && r.g("hud"));
+    r.run(5100);
     FakeGraph *g = r.g("panel");
     if (!g) {
         ok("published again", false);
@@ -1082,6 +1203,137 @@ static void adaptive_budget()
     ok("and says why", r.comp->governor().reason().find("raised") != std::string::npos);
 }
 
+static float opacity(FakeGraph *g, int quad)
+{
+    auto it = g->shown.quads.find(quad);
+    if (it == g->shown.quads.end() || it->second.uniforms["u_opacity"].empty())
+        return -1.0f;
+    return it->second.uniforms["u_opacity"][0];
+}
+
+static void fades()
+{
+    Rig r;
+    r.comp->set_fade_ms(250);
+    std::string err;
+    const uint32_t id = r.comp->add_video(1, r.map, params(Klass::Content, R(0, 0, W, H), true), VideoParams(), r.now,
+                                          &err);
+    VideoLayer *v = static_cast<VideoLayer *>(r.comp->layer(1, id));
+    const std::vector<uint8_t> a = frame(1);
+    v->offer(a.data(), r.now);
+    r.step(10);
+    FakeGraph *g = r.g("map");
+    const int quad = g ? video_view(g).atlas_quad : 0;
+    ok("acquiring: the first frame drawn at opacity 0", quad && g->shown.quads[quad].visible && opacity(g, quad) == 0.0f);
+    r.slots.on_shown(0x010004f0, r.now);
+    const uint64_t f0 = g->flushes;
+    const int64_t t0 = r.now;
+    std::vector<float> seen;
+    int64_t full_at = -1;
+    for (int k = 0; k < 40; k++) {
+        r.step(10);
+        const float o = opacity(g, quad);
+        if (seen.empty() || seen.back() != o)
+            seen.push_back(o);
+        if (o == 1.0f && full_at < 0)
+            full_at = r.now - t0;
+    }
+    bool rising = true;
+    for (size_t k = 1; k < seen.size(); k++)
+        rising = rising && seen[k] > seen[k - 1];
+    ok("shown: fades in from 0 to its opacity over 250 ms", full_at >= 250 && full_at <= 270 && rising);
+    ok("in a few flushes, a step at most every 50 ms", seen.size() >= 4 && seen.size() <= 7 && g->flushes - f0 <= 6);
+
+    Layer *l = r.comp->layer(1, id);
+    l->params.visible = false;
+    r.comp->changed(l);
+    const int64_t t1 = r.now;
+    int64_t hidden_at = -1;
+    float last = 1.0f;
+    bool falling = true;
+    for (int k = 0; k < 40; k++) {
+        r.step(10);
+        if (!g->shown.quads[quad].visible) {
+            if (hidden_at < 0)
+                hidden_at = r.now - t1;
+            continue;
+        }
+        const float o = opacity(g, quad);
+        falling = falling && o <= last;
+        last = o;
+    }
+    ok("hidden by its client, the last layer: drawn while it fades out over 250 ms, then hidden",
+       hidden_at >= 250 && hidden_at <= 270 && falling && last < 0.5f);
+    ok("the target kept through the fade, then lingering", r.port.releases == 0 &&
+                                                              r.slots.status(r.map).state == TargetState::Lingering);
+    r.run(2000);
+    ok("released after the linger, its scene kept", r.port.releases == 1 && r.g("map") == g);
+
+    Rig q;
+    q.comp->set_fade_ms(250);
+    LayerParams ip = params(Klass::Overlay, R(0, 0, 32, 32));
+    ip.opacity = 0.5f;
+    const uint32_t img = q.comp->add_image(1, q.panel, ip, 32, 32, 30, Sampling::Nearest, q.now, &err);
+    std::vector<uint8_t> px(32 * 32 * 4, 200);
+    static_cast<ImageLayer *>(q.comp->layer(1, img))->update({}, px.data(), px.size(), &err);
+    q.step(10);
+    q.slots.on_shown(0x01000400, q.now);
+    q.run(300);
+    FakeGraph *pg = q.g("panel");
+    const int iq = pg && !pg->visible().empty() ? pg->visible()[0] : 0;
+    ok("an image fades in to its own opacity", iq && opacity(pg, iq) == 0.5f);
+    const uint64_t qf = pg ? pg->flushes : 0;
+    q.slots.on_lost(0x01000400, "fetch removed", q.now);
+    q.run(1000);
+    ok("the display took the slot: released at once, nothing flushed, no fade",
+       !q.slots.requested(q.panel) && pg && pg->flushes == qf && q.g("panel") == pg);
+    q.run(4100);
+    pg = q.g("panel");
+    const int iq2 = pg && !pg->visible().empty() ? pg->visible()[0] : 0;
+    ok("asked for again: drawn at 0 until shown", iq2 && opacity(pg, iq2) == 0.0f);
+    q.slots.on_shown(0x01000400, q.now);
+    q.run(300);
+    ok("then fades in again", opacity(pg, iq2) == 0.5f);
+
+    Rig e;
+    e.comp->set_fade_ms(250);
+    const uint32_t fx = e.comp->add_effect(1, e.panel, params(Klass::Content, R(0, 0, 100, 100)), "", kFill, 0,
+                                           e.now, &err);
+    e.step(10);
+    e.slots.on_shown(0x01000400, e.now);
+    e.run(300);
+    Layer *el = e.comp->layer(1, fx);
+    el->params.visible = false;
+    e.comp->changed(el);
+    e.step(10);
+    ok("only effect layers: nothing to fade, lingering at once",
+       e.slots.status(e.panel).state == TargetState::Lingering);
+
+    Rig p;
+    p.comp->set_fade_ms(250);
+    const uint32_t pv = p.comp->add_video(1, p.map, params(Klass::Content, R(0, 0, W, H), true), VideoParams(), p.now,
+                                          &err);
+    VideoLayer *pvl = static_cast<VideoLayer *>(p.comp->layer(1, pv));
+    pvl->offer(a.data(), p.now);
+    p.step(10);
+    p.slots.on_parked(0x010004f0, p.now);
+    FakeGraph *mg = p.g("map");
+    const uint64_t pf = mg ? mg->flushes : 0;
+    const std::vector<uint8_t> b = frame(5);
+    for (int k = 0; k < 30; k++) {
+        pvl->offer((k & 1 ? a : b).data(), p.now);
+        p.step(33);
+    }
+    ok("parked: frames keep coming, nothing is staged or flushed",
+       mg && mg->flushes == pf && p.slots.status(p.map).state == TargetState::Parked);
+    p.slots.on_shown(0x010004f0, p.now);
+    pvl->offer(b.data(), p.now);
+    p.run(300);
+    const VideoView pvv = video_view(mg);
+    ok("shown: the newest frame written, faded in", mg->flushes > pf && pvv.atlas && pvv.atlas->px == rounded(b) &&
+                                                        opacity(mg, pvv.atlas_quad) == 1.0f);
+}
+
 int main()
 {
     video_basics();
@@ -1094,6 +1346,8 @@ int main()
     held_videos_together();
     refusals_lower_the_cap();
     stack_and_lifecycle();
+    warm_scene();
+    warm_scene_charged();
     republish_keeps_content();
     effects();
     limits();
@@ -1104,6 +1358,7 @@ int main()
     meshes();
     pass_order();
     animations();
+    fades();
     std::printf(failures ? "%d FAILED\n" : "all ok\n", failures);
     return failures ? 1 : 0;
 }

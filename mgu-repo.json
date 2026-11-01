@@ -50,8 +50,8 @@
       "kind": "app",
       "path": "waze/robertn_waze_cluster",
       "title": "Waze on cluster",
-      "description": "The CarPlay map (Waze, Apple Maps or Google Maps) on the instrument cluster, by Robert Nisipeanu. For now the map is stable only with the cluster display's Central display area Off and assisted driving view unticked; the app checks both. Installs the Waze tool and the cluster renderer with it.",
-      "requires": { "waze-on-cluster": "0.5.0" },
+      "description": "The CarPlay map (Waze, Apple Maps or Google Maps) on the instrument cluster, by Robert Nisipeanu. Set the cluster's Central display area to Map view: the Waze map replaces the stock map while CarPlay streams it. Installs the Waze tool and the cluster renderer with it.",
+      "requires": { "waze-on-cluster": "0.7.3" },
       "uninstallable": true,
       "mguHmi": ["ID7"]
     }

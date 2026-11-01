@@ -54,8 +54,8 @@ Layer fields (all optional):
 | `visible` | 1 | 0 hides it; a target no visible layer wants is released after its linger |
 | `exclusive` | 0 | 1 hides every layer below it while it is drawn |
 | `prewarm` | 0 | 1 asks for the slot before the layer's first content |
-| `contend` | 0 | 1 retries the slot after the stock HMI takes it (2, 5, 10, 20, then every 30 s); 0 waits until it is free |
-| `opacity` | 1 | 0-1, for video and image layers |
+| `contend` | 0 | 1 retries the slot after the stock HMI takes it (2, 5, 10, 20, then every 30 s), and on a target that takes over from the stock HMI (`map`), takes it from the stock content; 0 waits until it is free |
+| `opacity` | 1 | 0-1, for video and image layers; drawn times the target's fade in and out |
 | `rotate` | 0 | video, image and effect layers: degrees clockwise about the pivot |
 | `sx`, `sy` | 1 | video, image and effect layers: scale about the pivot |
 | `px`, `py` | the rect's centre | the pivot, in pixels from the rect's top-left; once set, kept until set again |
@@ -174,9 +174,9 @@ Every JSON message has `ev`.
 
 | ev | Fields | When |
 |---|---|---|
-| `hello` | `proto`, `backend` (`id7`), `targets` (`map:1088x480,panel:1920x720,hud:800x480`) | after the client's hello |
+| `hello` | `proto`, `backend` (`id7`, or `id8` on iDrive 8), `targets` (`map:1088x480,panel:1920x720,hud:800x480`; on iDrive 8 `map:874x749,hud:353x203,widget:2240x896`) | after the client's hello |
 | `layer` | `ref`, `state`, `reason` | the layer's state changed |
-| `target` | `target`, `state`, `holder`, `reason`, `retry_in_ms` | a target's state changed |
+| `target` | `target`, `state`, `holder`, `reason`, `retry_in_ms`, `rendering` | a target's state changed |
 | `budget` | `cap_kb_per_s`, `max_kb_per_s`, `floor_kb_per_s`, `reason` | the upload cap changed |
 | `error` | `op`, `ref`, `reason` | a message was refused |
 | `status` | `text` | after a status request |
@@ -186,9 +186,16 @@ or an asset it samples is not written yet; `reason` says which);
 `suspended` (below an exclusive layer); `stalled` (no content yet: no frame,
 no part with geometry, an asset it samples without pixels; or a video's
 frames stopped); `hidden`; `error` (the renderer refused it). Target states:
-`idle`, `acquiring`, `shown`, `lingering`, `waiting` (with `holder` `stock`
-or `foreign` when someone else holds the slot, and `retry_in_ms` when on a
-timer), `unavailable`.
+`idle`, `acquiring`, `parked` (mapped, behind the content the slot shows:
+`holder` `stock` or `foreign` once the slot table names it, and `reason`
+`parked behind stock`, `parked behind foreign`, or `parked` until then; on
+iDrive 8: offered, until the cluster shows it), `shown`, `lingering`,
+`waiting` (with `holder` `stock` or `foreign` when
+someone else holds the slot, and `retry_in_ms` when on a timer),
+`unavailable`. `rendering`, for a shown or lingering target: `verified`
+(the display's renderer is subscribed to its scene), `checking` (not
+subscribed yet; after 1.5 s shown the service asks for the slot again),
+`unobservable` (the service cannot see subscriptions); `none` otherwise.
 
 A client that does not read its events (over 1 MiB waiting) is
 disconnected.

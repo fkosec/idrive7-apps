@@ -67,6 +67,8 @@ bool Dcsm2Link::start(const Options &o, std::string *err)
             i.slot = s.slotId;
             i.status = s.slotStatus;
             i.content = s.mappingInfo.contentId.sceneId;
+            i.klass = s.mappingInfo.contentClass;
+            i.map_status = s.mappingInfo.mapStatus;
             e.slots.push_back(i);
         }
         push(e);
@@ -96,6 +98,20 @@ bool Dcsm2Link::start(const Options &o, std::string *err)
         e.scene = c.sceneId;
         e.initial = t.initial;
         e.status = t.final_;
+        push(e);
+    };
+    /* The start of the payload is enough to tell a layout apart. */
+    client_->onUndecoded = [this](vsomeip::event_t event, const uint8_t *p, size_t n) {
+        Event e(Event::Undecoded);
+        e.method = event;
+        e.status = (uint32_t)n;
+        e.text = hex_bytes(p, n, 64);
+        push(e);
+    };
+    client_->onSubscription = [this](vsomeip::event_t event, uint16_t code) {
+        Event e(Event::Subscription);
+        e.method = event;
+        e.status = code;
         push(e);
     };
     /* The KOMBI drops a client's content about 10 s after its last heartbeat
@@ -176,6 +192,8 @@ void Dcsm2Link::drain(Dcsm2Port *port, int64_t now_ms)
         case Event::Map: port->on_map_status(e.scene, e.initial, e.status, now_ms); break;
         case Event::Slots: port->on_slots(e.slots, now_ms); break;
         case Event::Heartbeat: port->on_heartbeat(e.up, now_ms); break;
+        case Event::Undecoded: port->on_undecoded(e.method, e.status, e.text, now_ms); break;
+        case Event::Subscription: port->on_subscription(e.method, (uint16_t)e.status, now_ms); break;
         }
     }
 }
@@ -183,6 +201,7 @@ void Dcsm2Link::drain(Dcsm2Port *port, int64_t now_ms)
 void Dcsm2Link::fetch(uint64_t scene) { client_->fetch({scene, 0}); }
 void Dcsm2Link::map(uint64_t scene, uint32_t cls, uint64_t slot) { client_->map({scene, 0}, cls, slot); }
 void Dcsm2Link::unmap(uint64_t scene) { client_->unmap({scene, 0}); }
+void Dcsm2Link::unmap_as(uint64_t client_handle, uint64_t scene) { client_->unmapAs(client_handle, {scene, 0}); }
 void Dcsm2Link::unfetch(uint64_t scene) { client_->unfetch({scene, 0}); }
 void Dcsm2Link::slots() { client_->requestSlotStatus(); }
 

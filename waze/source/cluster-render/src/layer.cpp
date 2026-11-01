@@ -236,7 +236,7 @@ bool ImageLayer::attach(Graph *g, int64_t, std::string *err)
     g_ = g;
     buf_ = g->buffer(TexFormat::RGBA8, w_, h_, sampling_);
     quad_ = buf_ ? g->quad(effect_, params.rect) : 0;
-    const float op = params.opacity;
+    const float op = params.opacity * fade_;
     if (!quad_ || !g->texture(quad_, "u_image", buf_) || !g->uniform(quad_, "u_opacity", &op, 1) ||
         !g->turn(quad_, params.turn()) || !g->show(quad_, false) || !g->order(quad_, order_)) {
         *err = "image buffer or quad refused";
@@ -279,9 +279,17 @@ void ImageLayer::place()
 {
     if (!g_)
         return;
-    const float op = params.opacity;
+    const float op = params.opacity * fade_;
     g_->place(quad_, params.rect);
     g_->turn(quad_, params.turn());
+    g_->uniform(quad_, "u_opacity", &op, 1);
+}
+
+void ImageLayer::faded()
+{
+    if (!g_)
+        return;
+    const float op = params.opacity * fade_;
     g_->uniform(quad_, "u_opacity", &op, 1);
 }
 
@@ -295,8 +303,12 @@ Stage ImageLayer::stage(int64_t now_ms)
     staged_ = 0;
     if (!g_ || !drawn_ || !have_ || (!whole_ && dirty_.empty()))
         return Stage::Idle;
-    if ((!clock_.due(now_ms) && !holding()) || !pacer_.ready(now_ms))
+    if (!clock_.due(now_ms) && !holding())
         return Stage::Idle;
+    if (!pacer_.ready(now_ms)) {
+        held_budget_++;
+        return Stage::Idle;
+    }
     const std::vector<crk::PixelRect> all{crk::PixelRect{0, 0, w_, h_}};
     bool written = true;
     staged_ = crk::write_rects(
@@ -341,6 +353,16 @@ int64_t ImageLayer::wake_in_ms(int64_t now_ms) const
         return -1;
     const int64_t w = clock_.ms_until_due(now_ms);
     return w > 0 ? w : -1;
+}
+
+WriteStats ImageLayer::write_stats() const
+{
+    WriteStats w;
+    w.frames = writes_;
+    w.bytes = bytes_;
+    w.failed = failed_;
+    w.holds = held_budget_;
+    return w;
 }
 
 std::string ImageLayer::stats() const

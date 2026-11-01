@@ -1,6 +1,7 @@
 # Builds the apps' GPU renderer (kit/renderd: mgu-renderd and the controller gate) in its Ubuntu 18.04 container and
 # runs its tests, on branches other than main and by hand. The binaries are kept as the run's artifact, to be
-# committed as kit/renderd/prebuilt/ (with SOURCE_SHA256 from kit/tools/make_kit.py). Publishes nothing.
+# committed as kit/renderd/prebuilt/ (with SOURCE_SHA256 from kit/tools/make_kit.py). On a renderd-* branch the
+# run commits them there itself, so the branch can be merged with its binary. Publishes nothing.
 name: Renderer
 
 on:
@@ -10,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -35,3 +36,12 @@ jobs:
           path: |
             kit/renderd/build/mgu-renderd
             kit/renderd/build/mgu-inputgate.so
+      - name: Commit the binaries (renderd-* branches)
+        if: github.event_name == 'push' && startsWith(github.ref_name, 'renderd-')
+        run: |
+          cp kit/renderd/build/mgu-renderd kit/renderd/build/mgu-inputgate.so kit/renderd/prebuilt/
+          python3 -c "import sys; sys.path.insert(0, 'kit/tools'); import make_kit as m; open(m.PRE_SUM, 'w').write(m.source_hash() + '\n# sha256 of kit/renderd src/, inputgate/*.cpp, protocol/*.xml, docker/, Makefile (make_kit.py source_hash) this binary was built from\n')"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add kit/renderd/prebuilt
+          git diff --cached --quiet || { git commit -m "kit renderer binary built by CI from ${GITHUB_SHA::7}"; git push; }

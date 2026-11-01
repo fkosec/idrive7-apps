@@ -103,6 +103,8 @@ struct Decoder::State {
     NalReader nal;
     std::string error;               /* first hard error of the current call */
     bool reorder = false;            /* the stream has B slices: output in display order */
+    int failed = 0;                  /* access units in a row that failed to decode */
+    bool picture = true;             /* this call's frames get an atlas */
 
     /* The current sequence; valid while `running`. */
     bool running = false;
@@ -125,6 +127,7 @@ struct Decoder::State {
     void stop();
     Result decode(mfxBitstream *bs, const FrameSink &cb);
     bool convert(mfxFrameSurface1 *in, const FrameSink &cb);
+    bool skip(mfxFrameSurface1 *out, mfxSyncPoint sync, const FrameSink &cb);
     bool fail(const std::string &msg)
     {
         if (error.empty()) error = msg;
@@ -187,10 +190,16 @@ void Decoder::State::access_unit(const AccessUnit &au, const FrameSink &cb)
         mfxBitstream bs;
         wrap(&bs, au);
         Result r = decode(&bs, cb);
-        if (r == Ok)
+        if (r == Ok) {
+            failed = 0;
             return;
+        }
         if (r == Failed) {
-            stop();
+            if (++failed >= kFailLimit) {
+                failed = 0;
+                stop();
+                error += "; " + std::to_string(kFailLimit) + " access units in a row failed: waiting for an SPS";
+            }
             return;
         }
         /* The access unit starts a sequence that needs a larger picture or
@@ -377,7 +386,7 @@ Decoder::State::Result Decoder::State::decode(mfxBitstream *bs, const FrameSink 
          * with a frame; with no frame the call is repeated. */
         if (sync) {
             stalls = 0;
-            if (!convert(out, cb))
+            if (!(picture ? convert(out, cb) : skip(out, sync, cb)))
                 return Failed;
         } else if (++stalls > kStallLimit) {
             fail(mfx_error("MFXVideoDECODE_DecodeFrameAsync makes no progress", sts));
@@ -414,7 +423,24 @@ bool Decoder::State::convert(mfxFrameSurface1 *in, const FrameSink &cb)
     if (pixels.size() != n)
         pixels.assign(n, 0);
     pack_nv12_atlas(vout.Data.Y, pitch, vout.Data.UV, pitch, w, h, pixels.data());
-    VideoFrame f = {w, h, &pixels};
+    /* The decode task finished before the VPP task that read its surface,
+     * so its flags are set. */
+    VideoFrame f = {w, h, in->Data.Corrupted, &pixels};
+    cb(f);
+    return true;
+}
+
+/* A frame without a picture: no VPP. The wait costs nothing the next frame
+ * would not wait for anyway (it refers to this one, and AsyncDepth 1 holds
+ * its decode until this one's is done), and it sets the Corrupted flags.
+ * Nothing holds the surface for VPP, so the decoder frees it once it is no
+ * longer a reference. */
+bool Decoder::State::skip(mfxFrameSurface1 *out, mfxSyncPoint sync, const FrameSink &cb)
+{
+    const mfxStatus sts = MFXVideoCORE_SyncOperation(session, sync, kSyncTimeoutMs);
+    if (sts != MFX_ERR_NONE)
+        return fail(mfx_error("MFXVideoCORE_SyncOperation", sts));
+    VideoFrame f = {w, h, out->Data.Corrupted, nullptr};
     cb(f);
     return true;
 }
@@ -465,7 +491,8 @@ bool Decoder::init(const char *dev, uint32_t out_w, uint32_t out_h, std::string 
     return true;
 }
 
-bool Decoder::feed(const uint8_t *data, size_t len, const FrameSink &cb, std::string *err, bool end_of_au)
+bool Decoder::feed(const uint8_t *data, size_t len, const FrameSink &cb, std::string *err, bool end_of_au,
+                   bool picture)
 {
     if (!s_) {
         *err = "decoder not initialised";
@@ -473,6 +500,7 @@ bool Decoder::feed(const uint8_t *data, size_t len, const FrameSink &cb, std::st
     }
     State &s = *s_;
     s.error.clear();
+    s.picture = picture;
     s.nal.push(data, len, end_of_au, [&](const AccessUnit &au) { s.access_unit(au, cb); });
     if (!s.error.empty()) {
         *err = s.error;
@@ -486,6 +514,7 @@ void Decoder::flush(const FrameSink &cb)
     if (!s_)
         return;
     State &s = *s_;
+    s.picture = true;
     s.nal.flush([&](const AccessUnit &au) { s.access_unit(au, cb); });
     if (s.running)
         s.decode(nullptr, cb);
@@ -494,5 +523,7 @@ void Decoder::flush(const FrameSink &cb)
 }
 
 void Decoder::shutdown() { s_.reset(); }
+
+bool Decoder::decoding() const { return s_ && s_->running; }
 
 }  // namespace woc

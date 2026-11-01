@@ -10,14 +10,22 @@
  * The renderer draws every frame the way waze-on-cluster always has (one
  * persistent R8 atlas written in changed tiles, packed fast motion, the
  * frame clock, newest frame only) within the budget all its clients share,
- * maps the slot from the first frame, and releases it after the frames stop
- * for stall_ms. Frames handed over while the renderer is not reachable are
- * dropped; the client reconnects by itself and the next frame shows.
+ * and maps the slot from the first frame. The layer is visible while
+ * CarPlay's cluster stream is live and not frozen (set_stream): hidden, the
+ * renderer lets the slot go and the stock map comes back. stall_ms, which
+ * releases the slot once the frames stop that long, is only a backstop,
+ * since how often a static map sends a frame depends on the phone (one about
+ * every ten seconds, another about 30 a second). Frames handed
+ * over while the renderer is not reachable are dropped; the client
+ * reconnects by itself and the next frame shows.
  *
- * The app's status line follows the layer and its target: idle until the
- * first frame, starting while the slot is asked for or held by the stock
- * map and while the renderer starts, showing with the frames handed over a
- * second, error when the renderer refused the layer or stays unreachable. */
+ * The app's status line follows the stream, the layer and its target: idle
+ * until the first frame or while the stream is not live, frozen while the
+ * stream is, starting while the slot is asked for or held by the stock map
+ * and while the renderer starts, showing with the frames handed over a
+ * second, error when the renderer refused the layer or stays unreachable.
+ * Showing, and idle while the stream is live, carry the stream's own reason
+ * (stream_health.h: the stream lost) when it has one. */
 #ifndef WOC_MAP_FEED_H
 #define WOC_MAP_FEED_H
 
@@ -38,12 +46,31 @@ struct FeedConfig {
 /* The status the Waze app shows (its render socket's "status" event), with
  * the shared upload cap and why it is what it is, for the diagnostics. */
 struct FeedStatus {
-    std::string state = "idle";   /* idle, starting, showing, error */
+    std::string state = "idle";   /* idle, starting, showing, frozen, error */
     std::string target;
     std::string page;
     std::string reason;
+    bool stream_reason = false;   /* the reason is the stream's (MapFeed::status) */
     unsigned upload_cap_kb = 0;   /* 0 until the renderer reports it */
     std::string upload_reason;
+};
+
+/* Whether a status is worth a log line: its state, reason or target differs
+ * from the last one logged. The page (the frame rate, the bytes captured)
+ * and the upload cap change every second and do not count. A change of the
+ * reason alone to or from the stream's waits until kStreamMs after the last
+ * such line, so a flaky link's losses, which have lines of their own, do not
+ * fill the log; a change of state or target is logged at once. Called
+ * with every status, so a change that waited is logged when due. */
+class StatusLog {
+public:
+    static const int64_t kStreamMs = 10000;
+    bool due(const FeedStatus &s, int64_t now_ms);
+
+private:
+    std::string state_, reason_;
+    bool stream_ = false, logged_ = false;
+    int64_t stream_ms_ = 0;
 };
 
 class MapFeed {
@@ -65,10 +92,13 @@ public:
      * reachable. */
     void offer(std::vector<uint8_t> *atlas, uint64_t id, int64_t now_ms);
 
+    /* Whether CarPlay's cluster stream is live, and whether it is frozen:
+     * the layer is visible only while it is live and not frozen. */
+    void set_stream(bool live, bool frozen);
+
     /* The status for the app, with decode the capture and decode part of
-     * the line; true once per change. */
-    FeedStatus status(const std::string &decode) const;
-    bool take_changed();
+     * the line and stream why the picture is not whole (empty: it is). */
+    FeedStatus status(const std::string &decode, const std::string &stream = std::string()) const;
     /* The renderer's own status text (targets, layers, the upload cap),
      * asked for again once the last request is answered. */
     void request_report();
@@ -81,11 +111,13 @@ private:
     FeedConfig cfg_;
     cr::Client client_;
     uint32_t layer_ = 0;
+    cr::LayerOptions lo_;   /* the layer's options as last sent */
+    bool live_ = false, frozen_ = false;
     std::string layer_state_ = "stalled", layer_reason_;
     std::string target_state_, holder_;
     unsigned cap_kb_ = 0, max_kb_ = 0;
     std::string budget_reason_, refused_, report_;
-    bool connected_ = false, changed_ = true, status_asked_ = false;
+    bool connected_ = false, status_asked_ = false;
     /* Unreachable this long (it starts with the first client): an error. */
     static const int64_t kUnreachableMs = 15000;
     int64_t down_since_ms_ = -1;

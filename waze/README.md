@@ -3,18 +3,17 @@
 The CarPlay map (Waze, Apple Maps or Google Maps) on the instrument cluster of an iDrive 7
 car, by Robert Nisipeanu, from
 [robertnisipeanu/idrive-apps](https://github.com/robertnisipeanu/idrive-apps) at
-`0fa0cd23b22064cc44e6075658aea8f8d3c78203`. Install **Waze on cluster** from the Store: it
+`a8f22b8594d7bba0c7b6472ba5431cec6e5ae081`. Install **Waze on cluster** from the Store: it
 installs the Waze tool and the cluster renderer first.
 
-**For now the map is stable only with the cluster display's Central display area set to Off and
-"Display assisted driving view when driver assistance is active" unticked** (the car's cluster display settings).
-From 0.4.0 the app reads both from the cluster and its first row names the one to change.
+**Set Instrument cluster > Central display area to Map view**: the Waze map replaces the stock map while
+CarPlay streams it, and the stock map is back when the stream ends or freezes.
 
 | Folder | |
 |---|---|
-| `robertn_waze_cluster/` | the iDrive app (Enable map, Disable map, status, the tools' log), a source package the head unit builds; 0.3.1 added the note, 0.4.0 checks the settings |
-| `cluster-render/` | the cluster renderer 0.1.0, as published there (`cluster-render@0.1.0.tgz`, sha256 `16961ee7…`) |
-| `waze-on-cluster/` | the Waze tool 0.5.0, as published there (`waze-on-cluster@0.5.0.tgz`, sha256 `49e19742…`) |
+| `robertn_waze_cluster/` | the iDrive app 0.4.1 (Enable map, Disable map, status, the tools' log), a source package the head unit builds |
+| `cluster-render/` | the cluster renderer 0.3.2, as published there (`cluster-render@0.3.2.tgz`, sha256 `4fc41e55…`) |
+| `waze-on-cluster/` | the Waze tool 0.7.3, as published there (`waze-on-cluster@0.7.3.tgz`, sha256 `990dfe22…`) |
 | `source/` | the two tools' source at that commit (`make target` builds them in Docker) |
 
 The tools need the Store's deploy tool 0.7.0 or newer (the Waze tool's activate and

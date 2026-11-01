@@ -44,16 +44,17 @@ public:
     void fetch(uint64_t scene) override;
     void map(uint64_t scene, uint32_t content_class, uint64_t slot) override;
     void unmap(uint64_t scene) override;
+    void unmap_as(uint64_t client_handle, uint64_t scene) override;
     void unfetch(uint64_t scene) override;
     void slots() override;
 
 private:
     struct Event {
-        enum Kind { Availability, Reply, Fetch, Map, Slots, Heartbeat } kind;
+        enum Kind { Availability, Reply, Fetch, Map, Slots, Heartbeat, Undecoded, Subscription } kind;
         explicit Event(Kind k) : kind(k) {}
         bool up = false, ok = false;
-        uint16_t method = 0;
-        uint32_t status = 0, initial = 0;
+        uint16_t method = 0;                /* Undecoded, Subscription: the event id */
+        uint32_t status = 0, initial = 0;   /* Undecoded: the length; Subscription: the code */
         std::string text;
         uint64_t scene = 0;
         std::vector<SlotInfo> slots;

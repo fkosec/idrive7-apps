@@ -141,7 +141,7 @@ void VideoLayer::show_blocks(bool on)
 
 void VideoLayer::set_opacity()
 {
-    const float a = opaque_ ? params.opacity : 0.0f;
+    const float a = opaque_ ? params.opacity * fade_ : 0.0f;
     g_->uniform(atlas_quad_, "u_opacity", &a, 1);
     if (block_quad_)
         g_->uniform(block_quad_, "u_opacity", &a, 1);
@@ -357,6 +357,16 @@ int64_t VideoLayer::wake_in_ms(int64_t now_ms) const
         return -1;
     const int64_t w = clock_.ms_until_due(now_ms);
     return w > 0 ? w : -1;
+}
+
+WriteStats VideoLayer::write_stats() const
+{
+    WriteStats w;
+    w.frames = sent_;
+    w.bytes = bytes_;
+    w.failed = failed_;
+    w.holds = held_budget_;
+    return w;
 }
 
 std::string VideoLayer::stats() const
