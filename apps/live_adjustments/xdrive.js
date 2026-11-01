@@ -18,6 +18,10 @@
  * The same job (DBE1, "current terminal-15 cycle") is in BMW's DSC_G20 and DSC_G30N descriptions,
  * so it is tried on every G car whose DSC answers the read. A DSC that answers the write with
  * "not in this session" (NRC 7E / 7F) gets 10 03 (extended session) and the same write once more.
+ * Hybrids (issue #52, G05 xDrive45e, DSC 0F2500): drive-ready (READY) with the engine stopped
+ * counts as running - the DSC refuses the write then (NRC 33) - so the conditions use BMW's vehicle
+ * state (VehicleCondition: 10 = drive-ready) as well as the rpm, and the mode and front-axle
+ * torque are read while READY, also in electric driving.
  * With the engine off DBE1 reads 0 anyway, so the state is shown only with the engine running.
  *
  * Front-axle torque, to see the effect while driving (read only, engine running, tab shown):
@@ -50,6 +54,7 @@ const ENGINE_ON_RPM = 400;              // above this it runs (the DSC reports t
 const POLL_MS = 4000;                   // DBE1 read while the tab is shown
 const TORQUE_MS = 1000;                 // front-axle torque read while the tab is shown and the engine runs
 const MOVING_KMH = 3;                   // the peak counts only while moving
+const READY = 10, READY_START = 8;      // VehicleCondition: FAHREN (drive-ready), FAHRBEREITSCHAFT_HERSTELLEN
 const CONFIRM_MS = 6000;                // the second press must come within this
 const SESSION_NRC = [0x7E, 0x7F];       // "not in this session": retry once in the extended session
 
@@ -58,7 +63,7 @@ const sgbdIndex = (data) => data.map(hex2).join('').replace(/^0+(?=.{6})/, '');
 const NRC_TEXT = {
     0x22: 'conditions not met · ignition on, engine off, P, parking brake on, car stationary',
     0x31: 'not supported by this DSC',
-    0x33: 'refused (security access) · switch the engine off first',
+    0x33: 'refused (security access) · switch drive readiness off: engine off, not READY (ignition on only)',
     0x7E: 'not allowed even in the extended diagnostic session',
     0x7F: 'not allowed even in the extended diagnostic session',
     0x13: 'not supported by this DSC',
@@ -152,7 +157,12 @@ class XDriveControl {
         const r = await this._read(DID_LMV);
         if (r.ok && r.data.length) {
             this.supported = true;
-            this.lmv = r.data[0] ? 1 : 0;
+            const v = r.data[0] ? 1 : 0;
+            if (v !== this.lmv || running !== this.lmvRunning) {
+                const d = this._live();
+                this.log.info('xdrive: DBE1 ' + v + (running ? ' (running/READY)' : ' (engine off)') + ' rpm ' + d.rpm + ' condition ' + d.condition);
+            }
+            this.lmv = v;
             this.lmvRunning = running;
             if (running && this.lmv === 1) this.requested = false;     // xDrive is back (ignition cycled)
         } else if (r.nrc != null) {
@@ -184,16 +194,19 @@ class XDriveControl {
         const d = (this.car && this.car.data()) || {};
         if (d.demo) return { demo: true };
         const num = (x) => (typeof x === 'number' && isFinite(x) ? x : null);
-        return { demo: false, rpm: num(d.rpm), speed: num(d.speed), stage: d.stage };
+        return { demo: false, rpm: num(d.rpm), speed: num(d.speed), stage: d.stage, condition: num(d.condition) };
     }
-    engineRunning() { const d = this._live(); return !d.demo && d.rpm !== null && d.rpm > ENGINE_ON_RPM; }
+    /** Drive-ready (READY): a hybrid can be ready with the engine stopped. Unknown without the signal. */
+    driveReady() { const d = this._live(); return !d.demo && d.condition !== null ? d.condition === READY || d.condition === READY_START : null; }
+    /** The engine runs, or the car is drive-ready (the DSC reports the mode then). */
+    engineRunning() { const d = this._live(); return !d.demo && ((d.rpm !== null && d.rpm > ENGINE_ON_RPM) || this.driveReady() === true); }
 
     /** The conditions the DSC wants, as far as the head unit can see them. ok: true / false / null (cannot tell). */
     checks() {
         const d = this._live();
         return [
             { label: 'Live car data', ok: !d.demo },
-            { label: 'Engine off', ok: d.demo ? false : d.rpm === null ? false : d.rpm < ENGINE_OFF_RPM },
+            { label: 'Engine off, not READY', ok: d.demo ? false : d.rpm === null ? false : d.rpm < ENGINE_OFF_RPM && this.driveReady() !== true },
             { label: 'Stationary', ok: d.demo ? false : d.speed === null ? false : d.speed < 0.5 },
             { label: 'Selector in P', ok: d.demo ? false : d.stage === 'P' ? true : d.stage ? false : null },
             { label: 'Parking brake on', ok: null },
@@ -207,7 +220,7 @@ class XDriveControl {
         if (!this._linkUp()) return 'Waiting for the diagnostic link';
         if (this.supported !== true) return this.supported === false ? 'Not available on this car' : 'DSC not answering yet';
         const bad = this.checks().find((c) => c.ok === false);
-        return bad ? (bad.label === 'Live car data' ? 'No live car data' : 'Needs: ' + bad.label.toLowerCase()) : null;
+        return bad ? (bad.label === 'Live car data' ? 'No live car data' : 'Needs: ' + bad.label.toLowerCase().replace('ready', 'READY')) : null;
     }
 
     /** "xDrive off": the first press asks, the second (within CONFIRM_MS) sends the one write. */

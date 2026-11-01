@@ -191,6 +191,34 @@ async function xdriveChecks() {
     await s.x.requestOff(); await s.x.requestOff();
     assert(!s.d.calls.some((c) => c.startsWith('dsc 10')), 'opened a session for NRC 22');
 
+    // BMW's vehicle state arrives as a name or a wire number
+    const Car = require('../../kit/runtime/car');
+    assert.strictEqual(Car.conditionOf('FAHREN'), 10);
+    assert.strictEqual(Car.conditionOf(7), 7);
+    assert.strictEqual(Car.conditionOf('SIGNAL_UNBEFUELLT'), undefined);
+    assert.strictEqual(Car.conditionOf(15), undefined);
+    // a hybrid (issue #52): READY with the engine stopped is not "engine off" - nothing is sent
+    s = await mk('on', 'g22', { rpm: 0, condition: 10 });
+    await s.x.requestOff(); await s.x.requestOff();
+    assert.deepStrictEqual(writes(s.d), [], 'sent while READY');
+    assert(/not READY/.test(s.x.note), s.x.note);
+    assert.strictEqual(s.x.view().checks[1].ok, false);
+    // ignition on only (PRUEFEN_ANALYSE_DIAGNOSE): sent; then READY in electric mode (rpm 0) reads the mode
+    s = await mk('on', 'g22', { rpm: 0, condition: 7 });
+    await s.x.requestOff(); await s.x.requestOff();
+    assert.deepStrictEqual(writes(s.d), ['dsc 2e db e1 00']);
+    assert.strictEqual(s.x.view().mode, 'REQUESTED');
+    s.car.v.condition = 10; s.d.engine = true; clock += 5000;
+    await s.x.tick();
+    assert.strictEqual(s.x.view().mode, 'RWD', 'READY with rpm 0 must read the mode');
+    s.car.v.speed = 20; clock += 1000;
+    await s.x.tick();
+    assert.deepStrictEqual(s.x.view().torque, { actual: 39.5, requested: 38 }, 'front torque is read while READY');
+    // the DSC dropped the request on the way to READY: shown as AWD, not as "requested"
+    s.d.lmv = 1; clock += 5000;
+    await s.x.tick();
+    assert.strictEqual(s.x.view().mode, 'AWD');
+
     // a confirm press that comes too late only asks again
     s = await mk('on', 'g22');
     await s.x.requestOff(); clock += 7000; await s.x.requestOff();
