@@ -68,6 +68,7 @@
 
 #define MAX_CLIENTS 16
 #define MAX_MSG (24u << 20)
+#define MAX_IN (MAX_MSG + (1u << 17))  /* an app's input buffer: a whole MAX_MSG message, its header and some of the next */
 #define LAYER_BASE layer_base      /* "MR"; the community renderers use "MG", 0x4d470000 and 0x4d470100 */
 #define SURF_BASE surf_base
 static uint32_t layer_base = 0x4d520000u, surf_base = 0x4d520100u;
@@ -1113,7 +1114,7 @@ static int handle(client *c, uint32_t type, const uint8_t *p, uint32_t len) {
     case M_RAMP: {
         if (nw < 2 || w[1] > 64 || nw < 2 + (size_t)w[1]) return -1;
         make_current_any(c);
-        gfx_ramp(&c->g, w[0], (int)w[1], w + 2);
+        if (gfx_ramp(&c->g, w[0], (int)w[1], w + 2) < 0) { log_warn("%s: %s", c->app, gfx_error()); send_error(c, gfx_error()); }
         return 0;
     }
     case M_LAYER: {
@@ -1330,16 +1331,8 @@ static void record(client *c, uint32_t type, const uint8_t *msg, uint32_t len) {
     if (c->rec) fwrite(msg, 1, 8 + (size_t)len, c->rec);
 }
 
-static int client_read(client *c) {
-    for (;;) {
-        if (c->incap - c->inlen < 65536) { c->incap = c->incap ? c->incap * 2 : 262144; c->in = realloc(c->in, c->incap); }
-        ssize_t r = recv(c->fd, c->in + c->inlen, c->incap - c->inlen, MSG_DONTWAIT);
-        if (r == 0) return -1;
-        if (r < 0) { if (errno == EAGAIN || errno == EWOULDBLOCK) break; if (errno == EINTR) continue; return -1; }
-        c->inlen += (size_t)r;
-        c->last_msg = now_us();
-        if (c->stale) { c->stale = 0; log_info("%s: talking again", c->app); update_all(); }
-    }
+/* the whole messages in c->in; makes room for the one that is not whole yet */
+static int client_parse(client *c) {
     if (!c->started && c->inlen >= 4 && dbr_is_magic(c->in)) {
         c->dialect = DIALECT_DBR;
         snprintf(c->app, sizeof c->app, "display-bridge app (uid %u)", c->uid);
@@ -1374,13 +1367,35 @@ static int client_read(client *c) {
         /* payload must be 4-byte aligned for the word views: copy if it is not */
         const uint8_t *pl = c->in + off + 8;
         uint8_t *tmp = NULL;
-        if (((uintptr_t)pl & 3) != 0) { tmp = malloc(len + 4); memcpy(tmp, pl, len); pl = tmp; }
+        if (((uintptr_t)pl & 3) != 0) { if (!(tmp = malloc(len + 4))) return -1; memcpy(tmp, pl, len); pl = tmp; }
         int rc = handle(c, type, pl, len);
         free(tmp);
         if (rc < 0) { log_warn("%s: bad message %u (len %u)", c->app, type, len); return -1; }
         off += 8 + len;
     }
     if (off) { memmove(c->in, c->in + off, c->inlen - off); c->inlen -= off; }
+    return 0;
+}
+
+/* parses between reads: the buffer holds at most one message being received (MAX_IN), however fast the app sends.
+   Reads about MAX_IN a wakeup: an app that never pauses does not hold up the others (poll comes back for the rest). */
+static int client_read(client *c) {
+    for (size_t got = 0; got < MAX_IN;) {
+        if (c->incap - c->inlen < 65536 && c->incap < MAX_IN) {
+            size_t cap = c->incap ? c->incap * 2 : 262144;
+            if (cap > MAX_IN) cap = MAX_IN;
+            uint8_t *n = realloc(c->in, cap);
+            if (!n) { log_warn("%s: out of memory for its messages", c->app); return -1; }
+            c->in = n; c->incap = cap;
+        }
+        ssize_t r = recv(c->fd, c->in + c->inlen, c->incap - c->inlen, MSG_DONTWAIT);
+        if (r == 0) return -1;
+        if (r < 0) { if (errno == EAGAIN || errno == EWOULDBLOCK) return 0; if (errno == EINTR) continue; return -1; }
+        c->inlen += (size_t)r; got += (size_t)r;
+        c->last_msg = now_us();
+        if (c->stale) { c->stale = 0; log_info("%s: talking again", c->app); update_all(); }
+        if (client_parse(c) < 0) return -1;
+    }
     return 0;
 }
 
