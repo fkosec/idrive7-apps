@@ -181,21 +181,24 @@ function drawXDrive(cv, G, t, x, act, bottom) {
     cv.text(word, W / 2, cy + 64, x.mode === 'REQUESTED' ? 64 : 96, col, { align: 'center', font: 'bold', spacing: 4 });
     const sub = x.mode === 'AWD' ? 'xDrive active · read from the DSC'
         : x.mode === 'RWD' ? 'xDrive off · read from the DSC · back after an ignition cycle'
-        : x.mode === 'REQUESTED' ? 'Start the engine without switching the ignition off'
+        : x.mode === 'REQUESTED' ? (x.path === 'vip' ? 'Accepted by the VIP · the front-axle torque shows the effect'
+            : 'Start the engine without switching the ignition off')
         : x.supported === false ? 'This DSC does not offer LMV_FUNKTION'
+        : x.path === 'vip' ? 'Sent through the VIP · the front-axle torque shows the effect'
         : 'The DSC reports the mode with the engine running';
     cv.text(sub, W / 2, cy + 100, 18, t.dim, { align: 'center', font: 'label', spacing: 1 });
 
     // the conditions the DSC wants: green = seen, red = not met, grey = the head unit cannot tell
     const checks = x.checks || [];
-    const cw = 250, cx0 = (W - checks.length * cw) / 2, ry = cy + 150;
+    const cw = 230, cx0 = (W - checks.length * cw) / 2, ry = cy + 150;
     checks.forEach((c, i) => {
         const dot = c.ok === true ? (t.go || '#2fd27a') : c.ok === false ? RED(t) : G.withAlpha('#ffffff', 0.35);
         const x0 = cx0 + i * cw + 20;
         cv.circle(x0 + 7, ry - 6, 7, dot);
         cv.text(c.label, x0 + 22, ry, 17, c.ok === false ? t.text : t.dim, { font: 'label' });
     });
-    const dsc = x.index ? 'DSC ' + x.index + (x.tested ? ' · tested variant' : ' · untested variant') : 'DSC variant unknown';
+    const dsc = (x.index ? (x.unit || 'DSC') + ' ' + x.index + (x.tested ? ' · tested variant' : ' · untested variant') : 'DSC variant unknown')
+        + (x.path === 'vip' ? ' · via VIP ' + x.vipIndex : '');
     const lmv = x.lmvIndex ? ' · transfer case ' + (x.lmvName ? x.lmvName + ' (' + x.lmvIndex + ')' : x.lmvIndex) : '';
     cv.text('Experimental · ' + dsc + lmv + ' · xDrive returns when the ignition is switched off', W / 2, ry + 40, 16,
         x.index && !x.tested ? (t.warn || '#d29922') : t.dim, { align: 'center', font: 'label' });

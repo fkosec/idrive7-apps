@@ -64,9 +64,17 @@ function dsc(kind) {
     const st = { calls: [], engine: false, lmv: 1, written: false, session: 1, front: [0x00, 0x9E, 0x00, 0x02, 0x00, 0x98, 0x00, 0x20] };
     const physical = async (target, sid, data, timeoutMs, accept) => {
         const req = [sid].concat(data).map((b) => b.toString(16).padStart(2, '0')).join(' ');
-        st.calls.push((target === 0x29 ? 'dsc ' : target === 0x19 ? 'lmv ' : 'other ') + req);
+        st.calls.push((target === 0x29 ? 'dsc ' : target === 0x19 ? 'lmv ' : target === 0x39 ? 'vip ' : 'other ') + req);
         let r;
-        if (target === 0x19 && sid === 0x22 && data[0] === 0xF1 && data[1] === 0x50) r = kind === 'nolmv' ? [0x7F, 0x22, 0x31] : [0x62, 0xF1, 0x50, 0x00, 0x0F, 0x21, 0x80];
+        // G05 xDrive45e (issue #52): IB_G05 at 0x29 answers DBE1 but it does nothing; VIP_G05 at 0x39
+        if (kind === 'g05' && target === 0x29 && sid === 0x22 && data[0] === 0xF1) r = [0x62, 0xF1, 0x50, 0x00, 0x0F, 0x25, 0x00];
+        else if (kind === 'g05' && target === 0x39 && sid === 0x22 && data[0] === 0xF1) r = [0x62, 0xF1, 0x50, 0x00, 0x0F, 0x25, 0x30];
+        else if (kind === 'g05' && target === 0x39 && sid === 0x22 && data[0] === 0xDB && data[1] === 0x44) r = [0x62, 0xDB, 0x44, st.vip === undefined ? 1 : st.vip];
+        else if (kind === 'g05' && target === 0x39 && sid === 0x2E && data[0] === 0xDB && data[1] === 0x2F) {
+            if (!st.engine) r = [0x7F, 0x2E, 0x22];
+            else { st.vip = data[2]; r = [0x6E, 0xDB, 0x2F]; }
+        } else if (target === 0x39 && sid === 0x22 && data[0] === 0xF1) r = [0x62, 0xF1, 0x50, 0x00, 0x0F, 0x25, 0x30];  // G22: VIP_G05 too
+        else if (target === 0x19 && sid === 0x22 && data[0] === 0xF1 && data[1] === 0x50) r = kind === 'nolmv' ? [0x7F, 0x22, 0x31] : [0x62, 0xF1, 0x50, 0x00, 0x0F, 0x21, 0x80];
         else if (target === 0x19 && sid === 0x22 && data[0] === 0xDB && data[1] === 0x32) r = kind === 'nolmv' ? [0x7F, 0x22, 0x31] : [0x62, 0xDB, 0x32].concat(st.front);
         else if (target !== 0x29) r = [0x7F, sid, 0x11];
         else if (kind === 'none') r = [0x7F, sid, 0x31];
@@ -197,12 +205,47 @@ async function xdriveChecks() {
     assert.strictEqual(Car.conditionOf(7), 7);
     assert.strictEqual(Car.conditionOf('SIGNAL_UNBEFUELLT'), undefined);
     assert.strictEqual(Car.conditionOf(15), undefined);
-    // a hybrid (issue #52): READY with the engine stopped is not "engine off" - nothing is sent
+    // a hybrid on the DBE1 path (G30 530e): READY with the engine stopped may send, as in 0.7.1
     s = await mk('on', 'g22', { rpm: 0, condition: 10 });
     await s.x.requestOff(); await s.x.requestOff();
-    assert.deepStrictEqual(writes(s.d), [], 'sent while READY');
-    assert(/not READY/.test(s.x.note), s.x.note);
-    assert.strictEqual(s.x.view().checks[1].ok, false);
+    assert.deepStrictEqual(writes(s.d), ['dsc 2e db e1 00'], 'READY with the engine stopped must send');
+    assert(/drive without switching/.test(s.x.note), s.x.note);
+    assert.strictEqual(s.x.view().checks.length, 6);
+    assert(!s.d.calls.some((c) => c.startsWith('vip ')), 'a DSC_G20 car never talks to the VIP');
+
+    // G05 xDrive45e (issue #52): IB_G05 at 0x29 -> the VIP path, never the DBE1 write
+    s = await mk('on', 'g05', { rpm: 0, condition: 7 });
+    assert.deepStrictEqual(s.d.calls, ['dsc 22 f1 50', 'vip 22 f1 50', 'vip 22 db 44', 'lmv 22 f1 50']);
+    assert.strictEqual(s.x.view().path, 'vip');
+    assert.strictEqual(s.x.view().unit, 'IB_G05');
+    assert.strictEqual(s.x.view().vipIndex, '0F2530');
+    // ignition on only: the VIP job wants the car running / READY - nothing is sent
+    await s.x.requestOff(); await s.x.requestOff();
+    assert.deepStrictEqual(s.d.calls.filter((c) => / 2e /.test(c)), []);
+    assert(/engine running or READY/.test(s.x.note), s.x.note);
+    // READY, stationary in P: the one VIP write, nothing to the DSC
+    s.car.v.condition = 10; s.d.engine = true;
+    await s.x.requestOff(); await s.x.requestOff();
+    assert.deepStrictEqual(s.d.calls.filter((c) => / 2e /.test(c)), ['vip 2e db 2f 00']);
+    assert.strictEqual(s.x.view().mode, 'REQUESTED');
+    assert.strictEqual(s.x.noteType, 'go');
+    // the mode is not read from DB44 (it read 0 in AWD on the G22): stays "requested", torque is shown
+    s.car.v.speed = 10; clock += 5000;
+    await s.x.tick();
+    assert.strictEqual(s.x.view().mode, 'REQUESTED');
+    assert.deepStrictEqual(s.x.view().torque, { actual: 39.5, requested: 38 });
+    assert(!s.d.calls.some((c) => /^dsc (2e|10|11)/.test(c)), 'sent something to the IB: ' + s.d.calls);
+    assert(s.d.calls.filter((c) => c.startsWith('vip ')).every((c) => /^vip (22 f1 50|22 db 44|2e db 2f 00)$/.test(c)));
+    // moving: no write
+    s = await mk('on', 'g05', { rpm: 0, condition: 10, speed: 12 });
+    s.d.engine = true;
+    await s.x.requestOff(); await s.x.requestOff();
+    assert.deepStrictEqual(s.d.calls.filter((c) => / 2e /.test(c)), [], 'sent while moving');
+    // infotainment only (WOHNEN, 5): the DSC answers NRC 33 there (issue #52) - nothing is sent
+    s = await mk('on', 'g22', { rpm: 0, condition: 5 });
+    await s.x.requestOff(); await s.x.requestOff();
+    assert.deepStrictEqual(writes(s.d), [], 'sent with the ignition off');
+    assert(/ignition on/.test(s.x.note), s.x.note);
     // ignition on only (PRUEFEN_ANALYSE_DIAGNOSE): sent; then READY in electric mode (rpm 0) reads the mode
     s = await mk('on', 'g22', { rpm: 0, condition: 7 });
     await s.x.requestOff(); await s.x.requestOff();

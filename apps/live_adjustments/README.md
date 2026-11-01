@@ -62,10 +62,18 @@ then no tab appears and nothing is sent. Code: `xdrive.js`.
   the tab works on any G car whose DSC answers `22 DB E1`. If the DSC answers the write with "not
   in this session" (NRC `7E` / `7F`), the app opens the extended session (`10 03`) and sends the
   same write once more.
-- The DSC accepts the write only with the ignition on, engine **off**, selector in P, parking
-  brake on and the car stationary. The app also refuses unless live data shows the engine off,
-  the car stationary and the selector not in R/N/D (it can't read the parking brake). The
-  button has to be pressed twice within 6 s.
+- The DBE1 path covers DSC_G20, DSC_G30N, DSC_G11, DSC_I1 and IB_G2X (and an unidentified DSC
+  that answers the read). A car with another unit at `0x29` and a G VIP (`0x39`, VIP_G05 /
+  VIP_G30N) uses the VIP's job instead: `2E DB 2F 00` (`STEUERN_LMV_FUNKTION_QDM`), sent with
+  the engine running or the car READY, stationary in P. `22 DB 44` is read and logged but not
+  shown as the mode (it read 0 in both modes on a G22); the front-axle torque shows the effect.
+  This is the G05 xDrive45e (IB_G05, `0F2500`), where the DBE1 write was accepted and did nothing
+  (issue #52).
+- The DSC accepts the DBE1 write only with the ignition on, engine **off**, selector in P, parking
+  brake on and the car stationary; on a hybrid, READY with the engine stopped is allowed. The app
+  also refuses unless live data shows the ignition on, the engine off, the car stationary and the
+  selector not in R/N/D (it can't read the parking brake). The button has to be pressed twice
+  within 6 s.
 - With the engine off, DBE1 always reads 0, so the screen shows AWD / RWD only once the engine
   is running. Started in the same ignition cycle, the cluster shows an all-wheel-drive notice.
 - Only the tab reads the DSC: the SGBD index (`22 F1 50`) once, then DBE1 every 4 s. A DSC that

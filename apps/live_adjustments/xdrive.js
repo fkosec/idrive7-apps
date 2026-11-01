@@ -18,10 +18,19 @@
  * The same job (DBE1, "current terminal-15 cycle") is in BMW's DSC_G20 and DSC_G30N descriptions,
  * so it is tried on every G car whose DSC answers the read. A DSC that answers the write with
  * "not in this session" (NRC 7E / 7F) gets 10 03 (extended session) and the same write once more.
- * Hybrids (issue #52, G05 xDrive45e, DSC 0F2500): drive-ready (READY) with the engine stopped
- * counts as running - the DSC refuses the write then (NRC 33) - so the conditions use BMW's vehicle
- * state (VehicleCondition: 10 = drive-ready) as well as the rpm, and the mode and front-axle
- * torque are read while READY, also in electric driving.
+ * The DBE1 path is for the DSC variants the research names: DSC_G20, DSC_G30N, DSC_G11, DSC_I1
+ * and IB_G2X (and any unidentified DSC that answers the read, as before). Other units at 0x29 with
+ * a G VIP (0x39, VIP_G05 / VIP_G30N) take the VIP path instead: VIP job STEUERN_LMV_FUNKTION_QDM,
+ *   write : 2E DB 2F 00   -> 6E DB 2F         (xDrive off, VIP)
+ *   read  : 22 DB 44      -> 62 DB 44 01 | 00 (STATUS_LMV_FUNKTION_QDM, logged only)
+ * sent with the engine running / the car READY, stationary in P. Issue #52: the G05 xDrive45e has
+ * IB_G05 (0F2500) at 0x29 - it took 2E DB E1 00 with the ignition on but nothing changed, and
+ * DBE1 read 0 even in stock AWD - so it goes the VIP way. DB44 read 0 in both modes on the G22, so
+ * on this path the mode is not derived from it: the front-axle torque shows the effect.
+ * Hybrids: VehicleCondition (10 = drive-ready) counts as running for reading the mode and torque,
+ * also in electric driving. The DBE1 write needs the ignition on (state 7 or READY; with only the
+ * infotainment on, state 5 WOHNEN, the DSC answers NRC 33) and the engine stopped; READY with the
+ * engine stopped is allowed (0.7.1 behaviour, the G30 530e took the write that way).
  * With the engine off DBE1 reads 0 anyway, so the state is shown only with the engine running.
  *
  * Front-axle torque, to see the effect while driving (read only, engine running, tab shown):
@@ -44,7 +53,16 @@ const LMV = 0x19;                       // transfer case (BMW diagnostic address
 const DID_TORQUE = [0xDB, 0x32];        // LMV_MOMENT: front-axle torque actual / requested
 const DID_SGBD_INDEX = [0xF1, 0x50];
 const DID_LMV = [0xDB, 0xE1];           // LMV_FUNKTION
+const VIP = 0x39;                       // VIP (BMW diagnostic address)
+const DID_VIP_LMV = [0xDB, 0x2F];       // VIP STEUERN_LMV_FUNKTION_QDM (write)
+const DID_VIP_STATUS = [0xDB, 0x44];    // VIP STATUS_LMV_FUNKTION_QDM (read)
 const TESTED_INDEX = ['0F2510'];        // DSC_G20, the variant the research ran on
+const DBE1_UNITS = {                    // units at 0x29 that take the DBE1 write, by SGBD index
+    '0F1970': 'DSC_I1', '0F1C50': 'DSC_I1', '0F1CE0': 'DSC_I1', '0F2100': 'DSC_G11',
+    '0F2510': 'DSC_G20', '0F2850': 'DSC_G30N', '0F2CE0': 'IB_G2X',
+};
+const OTHER_UNITS = { '0F2500': 'IB_G05', '0F29F0': 'IB_I20', '0F2E70': 'IB_G70' };
+const VIP_UNITS = { '0F2520': 'VIP_G05', '0F2530': 'VIP_G05', '0F2860': 'VIP_G30N' };
 const LMV_VARIANTS = {                  // G-series transfer cases by SGBD index
     '0F2180': 'LMV-G ATC13',
     '0F29E0': 'LMV-G ATC13_2',
@@ -55,6 +73,7 @@ const POLL_MS = 4000;                   // DBE1 read while the tab is shown
 const TORQUE_MS = 1000;                 // front-axle torque read while the tab is shown and the engine runs
 const MOVING_KMH = 3;                   // the peak counts only while moving
 const READY = 10, READY_START = 8;      // VehicleCondition: FAHREN (drive-ready), FAHRBEREITSCHAFT_HERSTELLEN
+const IGNITION = 7;                     // VehicleCondition: PRUEFEN_ANALYSE_DIAGNOSE (ignition on, not ready)
 const CONFIRM_MS = 6000;                // the second press must come within this
 const SESSION_NRC = [0x7E, 0x7F];       // "not in this session": retry once in the extended session
 
@@ -63,7 +82,7 @@ const sgbdIndex = (data) => data.map(hex2).join('').replace(/^0+(?=.{6})/, '');
 const NRC_TEXT = {
     0x22: 'conditions not met · ignition on, engine off, P, parking brake on, car stationary',
     0x31: 'not supported by this DSC',
-    0x33: 'refused (security access) · switch drive readiness off: engine off, not READY (ignition on only)',
+    0x33: 'refused (security access) · check the conditions above',
     0x7E: 'not allowed even in the extended diagnostic session',
     0x7F: 'not allowed even in the extended diagnostic session',
     0x13: 'not supported by this DSC',
@@ -84,6 +103,9 @@ class XDriveControl {
     _reset() {
         this.index = null;              // DSC SGBD index, hex like '0F2510'
         this.lmvIndex = null;           // transfer case (LMV) SGBD index, hex like '0F2180'
+        this.path = 'dsc';              // 'dsc': DBE1 write to the DSC; 'vip': DB2F write to the VIP
+        this.vipIndex = null;           // VIP SGBD index on the VIP path
+        this.vipStatus = null;          // last VIP DB44 value (logged, not shown as the mode)
         this.supported = null;          // true: DBE1 answered; false: the DSC refused the read
         this.lmv = null;                // last DBE1 value 0 | 1
         this.lmvRunning = false;        // DBE1 was read with the engine running (only then it means anything)
@@ -113,13 +135,35 @@ class XDriveControl {
         if (!this._linkUp()) { this.note = 'Waiting for the diagnostic link'; this.noteType = 'warn'; return; }
         const sg = await this._read(DID_SGBD_INDEX);
         if (sg.ok) this.index = sgbdIndex(sg.data);
-        await this._readLmv();
+        // an identified unit outside the DBE1 list, with a G VIP: the VIP path
+        if (this.index && !DBE1_UNITS[this.index]) {
+            const vp = await this._read(DID_SGBD_INDEX, VIP);
+            if (vp.ok && VIP_UNITS[sgbdIndex(vp.data)]) { this.path = 'vip'; this.vipIndex = sgbdIndex(vp.data); }
+        }
+        if (this.path === 'vip') { this.supported = true; await this._readVip(); }
+        else await this._readLmv();
         if (this.supported === true) {
             const lv = await this._read(DID_SGBD_INDEX, LMV);
             if (lv.ok) this.lmvIndex = sgbdIndex(lv.data);
         }
-        this.log.info('xdrive: DSC ' + (this.index || '?') + ' DBE1 ' + (this.supported === false ? 'refused' : this.lmv)
+        this.log.info('xdrive: DSC ' + (this.index || '?') + (this.unitName() ? ' (' + this.unitName() + ')' : '')
+            + (this.path === 'vip' ? ' path VIP ' + this.vipIndex + ' DB44 ' + this.vipStatus
+                : ' DBE1 ' + (this.supported === false ? 'refused' : this.lmv))
             + (this.lmvIndex ? ' LMV ' + this.lmvIndex : ''));
+    }
+
+    unitName() { return this.index ? DBE1_UNITS[this.index] || OTHER_UNITS[this.index] || null : null; }
+
+    /** VIP path: DB44 now and then, logged when it changes (it is not the mode, see the header). */
+    async _readVip() {
+        this.lastRead = this.now();
+        const r = await this._read(DID_VIP_STATUS, VIP);
+        const v = r.ok && r.data.length ? (r.data[0] ? 1 : 0) : r.nrc != null ? 'NRC ' + hex2(r.nrc) : null;
+        if (v !== null && v !== this.vipStatus) {
+            const d = this._live();
+            this.log.info('xdrive: VIP DB44 ' + v + ' rpm ' + d.rpm + ' condition ' + d.condition);
+        }
+        if (v !== null) this.vipStatus = v;
     }
 
     /** Called with each frame while the xDrive tab is shown: reads DBE1 now and then, and the
@@ -127,7 +171,7 @@ class XDriveControl {
     tick() {
         if (!this.enabled || this.busy || this.reading || this.supported === false || !this._linkUp()) return null;
         const jobs = [];
-        if (this.now() - this.lastRead >= POLL_MS) jobs.push(this._readLmv());
+        if (this.now() - this.lastRead >= POLL_MS) jobs.push(this.path === 'vip' ? this._readVip() : this._readLmv());
         if (this.supported === true && this.torqueOk !== false && this.engineRunning() && this.now() - this.lastTorque >= TORQUE_MS) {
             jobs.push(this._readTorque());
         }
@@ -204,9 +248,21 @@ class XDriveControl {
     /** The conditions the DSC wants, as far as the head unit can see them. ok: true / false / null (cannot tell). */
     checks() {
         const d = this._live();
+        if (this.path === 'vip') {
+            // the VIP job is sent with the engine running / the car READY, stationary in P
+            return [
+                { label: 'Live car data', ok: !d.demo },
+                { label: 'Engine running or READY', ok: d.demo ? false : this.engineRunning() },
+                { label: 'Stationary', ok: d.demo ? false : d.speed === null ? false : d.speed < 0.5 },
+                { label: 'Selector in P', ok: d.demo ? false : d.stage === 'P' ? true : d.stage ? false : null },
+                { label: 'Parking brake on', ok: null },
+            ];
+        }
         return [
             { label: 'Live car data', ok: !d.demo },
-            { label: 'Engine off, not READY', ok: d.demo ? false : d.rpm === null ? false : d.rpm < ENGINE_OFF_RPM && this.driveReady() !== true },
+            { label: 'Engine off', ok: d.demo ? false : d.rpm === null ? false : d.rpm < ENGINE_OFF_RPM },
+            // the DSC wants terminal 15: with the infotainment alone on (WOHNEN) it answers NRC 33
+            { label: 'Ignition on', ok: d.demo ? false : d.condition === null ? null : d.condition === IGNITION || this.driveReady() === true },
             { label: 'Stationary', ok: d.demo ? false : d.speed === null ? false : d.speed < 0.5 },
             { label: 'Selector in P', ok: d.demo ? false : d.stage === 'P' ? true : d.stage ? false : null },
             { label: 'Parking brake on', ok: null },
@@ -236,31 +292,35 @@ class XDriveControl {
         }
         this.confirmUntil = 0;
         this.busy = true;
-        this.note = 'Sending to the DSC…'; this.noteType = 'dim';
+        const vip = this.path === 'vip';
+        const name = vip ? 'VIP' : 'DSC', ecu = vip ? VIP : DSC;
+        this.note = 'Sending to the ' + name + '…'; this.noteType = 'dim';
         try {
             let r = await this._writeOff();
-            // Some DSC software versions take the write only in the extended diagnostic session:
+            // Some software versions take the write only in the extended diagnostic session:
             // open it (10 03) and send the same write once more. Nothing else is sent.
             if (r && r[0] === 0x7F && SESSION_NRC.indexOf(r[2]) >= 0) {
-                this.log.info('UDS -> DSC 10 03 (extended session, the DSC asked for it)');
-                const ses = await this.link.diag.physical(DSC, 0x10, [0x03], 3000,
+                this.log.info('UDS -> ' + name + ' 10 03 (extended session, the ' + name + ' asked for it)');
+                const ses = await this.link.diag.physical(ecu, 0x10, [0x03], 3000,
                     (u) => (u[0] === 0x50 && u[1] === 0x03) || (u[0] === 0x7F && u[1] === 0x10));
-                this.log.info('UDS <- DSC ' + (ses ? ses.map(hex2).join(' ') : 'no answer'));
+                this.log.info('UDS <- ' + name + ' ' + (ses ? ses.map(hex2).join(' ') : 'no answer'));
                 if (ses && ses[0] === 0x50) r = await this._writeOff();
                 else r = ses && ses[0] === 0x7F ? ['session', ses[2]] : ['session', null];
             }
             if (r && r[0] === 0x6E) {
                 this.requested = true;
-                this.note = 'Accepted by the DSC · start the engine without switching the ignition off';
+                this.note = vip ? 'Accepted by the VIP · drive without switching off and watch the front-axle torque'
+                    : this.engineRunning() ? 'Accepted by the DSC · drive without switching the ignition off'
+                        : 'Accepted by the DSC · start the engine without switching the ignition off';
                 this.noteType = 'go';
             } else if (r && r[0] === 'session') {
-                this.note = 'DSC refused the extended diagnostic session' + (r[1] != null ? ' (NRC ' + hex2(r[1]) + ')' : ' (no answer)');
+                this.note = name + ' refused the extended diagnostic session' + (r[1] != null ? ' (NRC ' + hex2(r[1]) + ')' : ' (no answer)');
                 this.noteType = 'warn';
             } else if (r && r[0] === 0x7F) {
-                this.note = 'DSC refused: ' + (NRC_TEXT[r[2]] || 'NRC ' + hex2(r[2]));
+                this.note = name + ' refused: ' + (NRC_TEXT[r[2]] || 'NRC ' + hex2(r[2]));
                 this.noteType = 'warn';
             } else {
-                this.note = 'No answer from the DSC';
+                this.note = 'No answer from the ' + name;
                 this.noteType = 'warn';
             }
         } catch (e) {
@@ -274,10 +334,12 @@ class XDriveControl {
     }
 
     async _writeOff() {
-        this.log.info('UDS -> DSC 2E DB E1 00 (xDrive off, experimental)');
-        const r = await this.link.diag.physical(DSC, 0x2E, [0xDB, 0xE1, 0x00], 3000,
-            (u) => (u[0] === 0x6E && u[1] === 0xDB && u[2] === 0xE1) || (u[0] === 0x7F && u[1] === 0x2E));
-        this.log.info('UDS <- DSC ' + (r ? r.map(hex2).join(' ') : 'no answer'));
+        const vip = this.path === 'vip';
+        const name = vip ? 'VIP' : 'DSC', did = vip ? DID_VIP_LMV : DID_LMV;
+        this.log.info('UDS -> ' + name + ' 2E ' + did.map(hex2).join(' ') + ' 00 (xDrive off, experimental)');
+        const r = await this.link.diag.physical(vip ? VIP : DSC, 0x2E, did.concat([0x00]), 3000,
+            (u) => (u[0] === 0x6E && u[1] === did[0] && u[2] === did[1]) || (u[0] === 0x7F && u[1] === 0x2E));
+        this.log.info('UDS <- ' + name + ' ' + (r ? r.map(hex2).join(' ') : 'no answer'));
         return r;
     }
 
@@ -285,13 +347,16 @@ class XDriveControl {
     view() {
         const running = this.engineRunning();
         let mode = 'UNKNOWN';
-        if (running && this.lmvRunning && this.lmv !== null) mode = this.lmv ? 'AWD' : 'RWD';
+        if (this.path === 'dsc' && running && this.lmvRunning && this.lmv !== null) mode = this.lmv ? 'AWD' : 'RWD';
         else if (this.requested) mode = 'REQUESTED';
         return {
             enabled: this.enabled,
             mode,
             running,
+            path: this.path,
             index: this.index,
+            unit: this.unitName(),
+            vipIndex: this.vipIndex,
             tested: !!this.index && TESTED_INDEX.indexOf(this.index) >= 0,
             lmvIndex: this.lmvIndex,
             lmvName: this.lmvIndex ? LMV_VARIANTS[this.lmvIndex] || null : null,
@@ -309,4 +374,4 @@ class XDriveControl {
     }
 }
 
-module.exports = { XDriveControl, DSC, LMV, TESTED_INDEX, LMV_VARIANTS, ENGINE_OFF_RPM, ENGINE_ON_RPM };
+module.exports = { XDriveControl, DSC, LMV, VIP, TESTED_INDEX, DBE1_UNITS, VIP_UNITS, LMV_VARIANTS, ENGINE_OFF_RPM, ENGINE_ON_RPM };
