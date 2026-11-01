@@ -13,6 +13,7 @@
  *
  *   listSheet(settings)     the app's settings: a row per setting, a list of values to pick from
  *   cardSheet(spec)         a card: title, rows of label and value, action buttons
+ *   list(), pill()          the settings' scrolling rows and round buttons, for an app's own sheets
  */
 const { withAlpha } = require('./canvas');
 const G = require('./gauges');
@@ -246,4 +247,4 @@ function cardSheet(spec) {
     return sh;
 }
 
-module.exports = { listSheet, cardSheet };
+module.exports = { listSheet, cardSheet, list, pill, TOP };
