@@ -360,6 +360,12 @@ sh deploy-car.sh backups    # list backups
 sh deploy-car.sh restore    # back to stock (asks you to type YES)
 ```
 
+> **Please share this project.** These apps are free and open source, but a lot of people are
+> selling them and claiming they made them. If you paid for them, you were scammed. Help spread
+> the word: share this repository on social media, forums and BMW groups so people can find the
+> free original here:
+> **https://github.com/cauliflowermossgrape/idrive7-apps**
+
 ### 3.4 Doom: the extra steps
 
 Doom installs like the other apps: it is in the kit unless you list only other apps. There are
