@@ -38,7 +38,9 @@ mgu.run({
         // cool-down: hardS = seconds of hard use; needS = cool-down it asks for; cool = gentle seconds done
         let hardS = 0, needS = 0, cool = 0, doneAt = 0;
         car.onSample((d, t) => {
-            const dt = lastT ? Math.min(250, t - lastT) / 1000 : 0; lastT = t;
+            // sample times (the demo replays late steps with theirs) are wall-clock: a step back counts as no time,
+            // and "cooled" times its 20 s on the steady clock
+            const dt = lastT ? G.clamp(t - lastT, 0, 250) / 1000 : 0, m = mono(); lastT = t;
             if (G.isNum(d.rpm)) {
                 const kw = G.isNum(d.torque) ? d.torque * d.rpm / 9549 : 0;
                 const hard = d.rpm > HARD_RPM || kw > HARD_KW;
@@ -48,14 +50,13 @@ mgu.run({
                     if (hardS > 8) needS = G.clamp(COOL_MIN + hardS * 3, COOL_MIN, COOL_MAX);
                 } else if (needS > 0 && gentle) {
                     cool += dt;
-                    if (cool >= needS && !doneAt) doneAt = t;
+                    if (cool >= needS && !doneAt) doneAt = m;
                 } else if (!needS) {
                     hardS = Math.max(0, hardS - dt * 0.2);      // short bursts fade away
                 }
                 // "cooled" message stays for 20 s, then all clear
-                if (doneAt && t - doneAt > 20000) { hardS = 0; needS = 0; cool = 0; doneAt = 0; }
+                if (doneAt && m - doneAt > 20000) { hardS = 0; needS = 0; cool = 0; doneAt = 0; }
             }
-            const m = mono();
             if (m - lastHist > 5000 && (G.isNum(d.oil) || G.isNum(d.coolant))) {
                 lastHist = m; hist.push([m, d.oil, d.coolant, d.rpm, d.speed]);
                 while (hist.length > 240) hist.shift();
